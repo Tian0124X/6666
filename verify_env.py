@@ -67,7 +67,7 @@ project_modules = [
     ("app.models.request", "models.request"),
     ("app.models.response", "models.response"),
     ("app.agent.state", "agent.state"),
-    ("app.main", "app.main (FastAPI)"),
+    ("main", "main (FastAPI)"),
 ]
 for mod, name in project_modules:
     try:
@@ -113,7 +113,7 @@ if all_ok:
     print("  ✅ 所有检查通过！环境就绪。")
     print()
     print("  启动命令:")
-    print("    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload")
+    print("    uvicorn main:app --host 0.0.0.0 --port 8000 --reload")
     print("    streamlit run frontend/app.py --server.port 8501")
 else:
     print("  ❌ 部分检查未通过，请按上述提示修复。")
