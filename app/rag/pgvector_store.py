@@ -36,18 +36,25 @@ class PGVectorStore:
     @property
     def conn(self):
         if self._conn is None or self._conn.closed:
-            import psycopg2
-            from pgvector.psycopg2 import register_vector
+            try:
+                import psycopg2
+                from pgvector.psycopg2 import register_vector
+            except ImportError as e:
+                raise RuntimeError(f"pgvector 依赖未安装: {e}") from e
+
+            if not settings.PG_PASSWORD:
+                raise RuntimeError("PG_PASSWORD 未配置，pgvector 不可用")
+
             self._conn = psycopg2.connect(
-                host=getattr(settings, 'PG_HOST', 'localhost'),
-                port=getattr(settings, 'PG_PORT', 5432),
-                dbname=getattr(settings, 'PG_DATABASE', 'enterprise_ai_office'),
-                user=getattr(settings, 'PG_USER', 'eao_user'),
-                password=getattr(settings, 'PG_PASSWORD', 'eao_pass_2026'),
+                host=settings.PG_HOST,
+                port=settings.PG_PORT,
+                dbname=settings.PG_DATABASE,
+                user=settings.PG_USER,
+                password=settings.PG_PASSWORD,
             )
-            self._conn.autocommit = True  # 必须在 register_vector 之前设置
+            self._conn.autocommit = True
             register_vector(self._conn)
-            logger.info("✅ pgvector 连接就绪")
+            logger.info("pgvector 连接就绪")
         return self._conn
 
     @property

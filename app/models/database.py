@@ -1,7 +1,7 @@
 """MySQL 数据库连接 — SQLAlchemy 2.0"""
 
 import logging
-from sqlalchemy import create_engine, Column, BigInteger, String, Text, TIMESTAMP, Enum, JSON, Integer
+from sqlalchemy import create_engine, Column, BigInteger, String, Text, TIMESTAMP, Enum, JSON, Integer, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.sql import func
 from app.config import settings
@@ -59,11 +59,16 @@ def _get_engine():
                 pool_recycle=3600,
                 pool_pre_ping=True,
             )
+            # 测试连接
+            with _engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
             Base.metadata.create_all(_engine)
             logger.info("MySQL 连接池就绪")
-        except Exception:
+        except Exception as e:
             _engine_failed = True
-            logger.info("MySQL 未配置或不可用，对话持久化暂不启用 (内存+Redis 正常运作)")
+            logger.warning(
+                f"MySQL 不可用 ({e})，对话持久化降级为内存+Redis"
+            )
     return _engine if not _engine_failed else None
 
 

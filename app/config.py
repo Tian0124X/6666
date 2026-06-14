@@ -32,6 +32,13 @@ class Settings:
     CHROMA_HOST: str = os.getenv("CHROMA_HOST", "localhost")
     CHROMA_PORT: int = int(os.getenv("CHROMA_PORT", "8001"))
 
+    # === PostgreSQL + pgvector (可选) ===
+    PG_HOST: str = os.getenv("PG_HOST", "localhost")
+    PG_PORT: int = int(os.getenv("PG_PORT", "5432"))
+    PG_DATABASE: str = os.getenv("PG_DATABASE", "enterprise_ai_office")
+    PG_USER: str = os.getenv("PG_USER", "eao_user")
+    PG_PASSWORD: str = os.getenv("PG_PASSWORD", "")
+
     # === 应用 ===
     APP_ENV: str = os.getenv("APP_ENV", "development")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
