@@ -3258,15 +3258,17 @@ def show():
 ### 9.3 启动命令
 
 ```bash
-# 终端 1: 启动 FastAPI 后端
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+# 终端 1: 启动 FastAPI 后端 (二选一)
+python main.py                              # PyCharm 直接 Run
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload  # CLI
 
 # 终端 2: 启动 React 前端
-cd frontend-react && npm run dev  # → http://localhost:5173
+cd frontend-react && npm install && npm run dev  # → http://localhost:5173
 
 # 访问:
 # - API 文档: http://localhost:8000/docs
-# - 前端界面: http://localhost:8501
+# - 前端界面: http://localhost:5173
+# - 健康检查: http://localhost:8000/api/health
 ```
 
 ---
@@ -3420,7 +3422,7 @@ RUN mkdir -p data/documents data/reports data/chroma
 EXPOSE 8000
 
 # 启动命令
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 ```yaml

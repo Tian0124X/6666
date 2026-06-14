@@ -11,6 +11,13 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# BGE 模型预下载到镜像内 (可选，跳过则首次启动下载)
+# 国内用镜像: HF_ENDPOINT=https://hf-mirror.com
+ARG HF_ENDPOINT=""
+RUN if [ -n "$HF_ENDPOINT" ]; then \
+      python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-zh-v1.5')"; \
+    fi
+
 # 应用代码
 COPY . .
 
