@@ -2,9 +2,10 @@
 Human-in-the-Loop — 借鉴 DATAGEN 的 interrupt() 模式
 
 敏感操作 (文件删除/代码执行/外部API) 前暂停 Agent，等待人工审批。
-LangGraph interrupt() + Command(resume=...) 实现。
+使用 asyncio.Event 非阻塞等待，不影响其他并发请求。
 """
 
+import asyncio
 import logging
 from typing import Optional
 from dataclasses import dataclass, field
@@ -21,18 +22,19 @@ class PendingApproval:
     description: str     # 人工可读的操作说明
     details: dict        # 操作参数详情
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    event: asyncio.Event = field(default_factory=asyncio.Event)
 
 _pending: dict[str, PendingApproval] = {}    # thread_id → approval
 _decisions: dict[str, bool] = {}              # thread_id → approved/rejected
 
 
-def request_approval(thread_id: str, action: str, description: str, details: dict) -> bool:
+async def request_approval(thread_id: str, action: str, description: str, details: dict, timeout: float = 120.0) -> bool:
     """
-    请求人工审批。阻塞直到用户做出决定。
+    请求人工审批。异步非阻塞等待，直到用户做出决定或超时。
     返回 True = 批准, False = 拒绝。
 
     用法 (Agent 节点内):
-        approved = request_approval(config["thread_id"], "delete_file", ...)
+        approved = await request_approval(config["thread_id"], "delete_file", ...)
         if not approved:
             return {"final_answer": "操作已被用户拒绝。"}
     """
@@ -45,36 +47,37 @@ def request_approval(thread_id: str, action: str, description: str, details: dic
     _pending[thread_id] = approval
     logger.info(f"🔔 等待审批: [{action}] {description} (thread={thread_id})")
 
-    # 这里简化: 同步等待最多 120 秒
-    # 生产环境用 LangGraph interrupt() + asyncio.Event
-    import time
-    waited = 0
-    while thread_id not in _decisions and waited < 120:
-        time.sleep(1)
-        waited += 1
+    try:
+        # 异步非阻塞等待：不卡事件循环
+        await asyncio.wait_for(approval.event.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning(f"审批超时 → 自动拒绝: {thread_id}")
+        _pending.pop(thread_id, None)
+        return False
 
     decision = _decisions.pop(thread_id, None)
     _pending.pop(thread_id, None)
 
     if decision is None:
-        logger.warning(f"审批超时 → 自动拒绝: {thread_id}")
         return False
     return decision
 
 
 def approve(thread_id: str) -> bool:
-    """批准操作"""
+    """批准操作 — 设置 Event 唤醒等待的协程"""
     if thread_id in _pending:
         _decisions[thread_id] = True
+        _pending[thread_id].event.set()  # 非阻塞唤醒
         logger.info(f"✅ 已批准: {thread_id}")
         return True
     return False
 
 
 def reject(thread_id: str, reason: str = "") -> bool:
-    """拒绝操作"""
+    """拒绝操作 — 设置 Event 唤醒等待的协程"""
     if thread_id in _pending:
         _decisions[thread_id] = False
+        _pending[thread_id].event.set()  # 非阻塞唤醒
         logger.info(f"❌ 已拒绝: {thread_id} ({reason})")
         return True
     return False
