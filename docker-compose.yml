@@ -1,0 +1,109 @@
+# 企业智能办公助手平台 — 开发环境 Docker Compose
+# 启动: docker-compose up -d
+# 停止: docker-compose down
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: eao-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.0
+    container_name: eao-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-eao_root_2026}
+      MYSQL_DATABASE: enterprise_ai_office
+      MYSQL_USER: ${MYSQL_USER:-eao_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-eao_pass_2026}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: eao-chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: eao-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: enterprise_ai_office
+      POSTGRES_USER: eao_user
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-eao_pass_2026}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-pg.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eao_user -d enterprise_ai_office"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eao-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - MYSQL_HOST=mysql
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - PG_HOST=postgres
+      - PG_PORT=5432
+    depends_on:
+      redis:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  mysql_data:
+  chroma_data:
+  pgdata:

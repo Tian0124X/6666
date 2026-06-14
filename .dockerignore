@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.egg
+.pytest_cache/
+htmlcov/
+.coverage
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Node (frontend-react)
+frontend-react/node_modules/
+frontend-react/dist/
+frontend-react/.vite/
+
+# Git
+.git/
+
+# Environment
+.env
+.env.local
+
+# Data (mounted as volumes)
+data/documents/*
+data/reports/*
+data/chroma/*
+!data/documents/.gitkeep
+!data/reports/.gitkeep
+!data/chroma/.gitkeep
+
+# Docker
+docker-data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs (don't need in container)
+*.md
+!README.md
