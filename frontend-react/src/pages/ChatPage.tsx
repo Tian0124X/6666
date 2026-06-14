@@ -26,17 +26,18 @@ export default function ChatPage() {
   const [showRating, setShowRating] = useState(false);
   const [approval, setApproval] = useState<{ thread_id: string; action: string; description: string; details: Record<string,unknown> } | null>(null);
 
-  // 轮询人类审批
+  // 轮询人类审批 (10s间隔，已有弹窗时跳过)
   useEffect(() => {
+    if (approval) return;  // 已有审批弹窗，停止轮询
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`/api/chat/approvals/${userId}`);
         const data = await res.json();
         if (data.pending) setApproval(data.approval);
       } catch { /* ignore */ }
-    }, 3000);
+    }, 10_000);  // 10s (之前3s太频繁)
     return () => clearInterval(interval);
-  }, [userId]);
+  }, [userId, approval]);
 
   const handleRate = async (score: number) => {
     try {
