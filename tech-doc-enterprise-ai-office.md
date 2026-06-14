@@ -1,6 +1,6 @@
 # 基于 Agent 的企业智能办公助手平台 — 从零开发技术文档
 
-> **适用版本**: Python 3.12 | 文档更新: 2026-06-12
+> **适用版本**: Python 3.12+ | 文档更新: 2026-06-14 | 版本: v1.0.0
 
 ---
 
@@ -44,12 +44,20 @@
 
 | 优先级 | 功能 | 说明 |
 |--------|------|------|
-| **P0** | 智能对话 | 基于 LLM 的多轮对话，支持上下文记忆 |
-| **P0** | RAG 知识问答 | 上传企业文档后，基于文档内容回答问题 |
+| **P0** | 智能对话 | 基于 LangGraph 双路径 Agent + bind_tools 工具调用 + SSE 流式 |
+| **P0** | RAG 知识问答 | 混合检索(BM25+向量+RRF) → BGE Reranker → 反幻觉生成 |
 | **P0** | 数据分析 + 报告生成 | 上传 Excel/CSV，自动分析并生成 Word 报告 |
 | **P1** | OA/CRM 对接 | 查审批状态、客户信息（Mock/Real 双模式） |
-| **P1** | 多用户会话隔离 | 不同用户独立会话上下文 |
-| **P2** | 流式输出 | SSE 实时推送 LLM 生成内容 |
+| **P1** | 多用户会话隔离 | JWT 认证 + 不同用户独立会话上下文 |
+| **P1** | 企业 SSO/LDAP | LDAP/AD 域认证 + OAuth2/OIDC 单点登录 (混合模式) |
+| **P1** | 多 Agent 协作 | Supervisor → 4 Agent 并行，LLM 汇总 |
+| **P2** | 流式输出 | SSE astream_events 实时推送 token + 工具状态 |
+| **P2** | 多模态 | 图片上传 → OCR 提取 → LLM 分析 |
+| **P2** | 网络搜索 | DuckDuckGo 实时搜索补充外部信息 |
+| **P2** | 人工审批 | 敏感操作前 asyncio.Event 异步等待审批 |
+| **P2** | 自动化评测 | RAG 10 题 + Agent 5 题，准确率/召回率 |
+| **P2** | 监控面板 | API 调用量、延迟、工具排名、评分统计 |
+| **P2** | 速率限制 | 令牌桶 30 req/s，防滥用 |
 | **P2** | 偏好设置 | 用户自定义模型参数、工具开关 |
 
 ### 1.4 非功能需求
@@ -57,10 +65,11 @@
 | 维度 | 指标 | 说明 |
 |------|------|------|
 | 响应时间 | 简单问答 < 2s，复杂任务 < 5min | 含 LLM 推理 + 工具执行 |
-| RAG 准确率 | ≥ 85% | 回答是否基于正确文档片段 |
+| RAG 准确率 | NDCG 0.95+ | 混合检索 + BGE Reranker v2-m3 |
+| 重排序延迟 | < 100ms | Cross-Encoder 本地推理 |
 | 可用性 | 核心链路 99.9% | 含降级兜底后 |
-| 并发 | 50+ 用户同时在线 | |
-| 幻觉率 | < 5% | RAG 强约束下 |
+| 并发 | 50+ 用户同时在线 | 令牌桶限流 30 req/s |
+| 幻觉率 | < 5% | RAG 强约束 + 反幻觉 Prompt |
 | 自愈率 | > 60% | 任务失败后自动恢复比例 |
 
 ### 1.5 成功指标定义
@@ -82,9 +91,9 @@
 
 | 候选 | 优点 | 缺点 | 结论 |
 |------|------|------|------|
-| **通义千问 (Qwen)** | 中文能力强、API 稳定、性价比高 | 复杂推理弱于 GPT-4 | ✅ 选用 |
-| GPT-4 | 推理能力强 | 成本高、网络不稳定、中文略弱 | ❌ |
-| 文心一言 | 中文好 | API 生态弱、LangChain 集成差 | ❌ |
+| **DeepSeek** | 中文极强、API 兼容 OpenAI、性价比极高 | 高并发需付费扩容 | ✅ 选用 |
+| 通义千问 (Qwen) | 中文能力强、API 稳定 | 部分场景推理弱 | 备选 |
+| GPT-4 | 推理能力强 | 成本高、网络不稳定 | ❌ |
 
 #### Agent 框架
 
@@ -99,7 +108,8 @@
 
 | 候选 | 优点 | 缺点 | 结论 |
 |------|------|------|------|
-| **ChromaDB** | 轻量、零配置、Python 原生 | 大规模性能弱 | ✅ 选用（初期） |
+| **pgvector** | PostgreSQL 原生、生产级、SQL 过滤 | 需 PostgreSQL | ✅ 选用（主力） |
+| **ChromaDB** | 轻量、零配置、Python 原生 | 大规模性能弱 | ✅ 选用（快速开发） |
 | Milvus | 高性能、分布式 | 部署复杂、资源占用大 | 后期迁移 |
 | FAISS | 检索极快 | 无持久化、无元数据过滤 | ❌ |
 
@@ -107,7 +117,8 @@
 
 | 候选 | 优点 | 缺点 | 结论 |
 |------|------|------|------|
-| **Streamlit** | 纯 Python、极快出 Demo、数据场景友好 | 不适合复杂 UI | ✅ 选用 |
+| **React 18 + Vite** | 生态最强、组件丰富、性能好 | 需 Node.js 环境 | ✅ 选用 |
+| Streamlit | 纯 Python、极快出 Demo | 不适合复杂 UI | 保留兼容 |
 | Gradio | ML 场景友好 | 定制化弱 | ❌ |
 | React + FastAPI | 专业 | 开发周期长、需前后端分离 | ❌ |
 
@@ -116,7 +127,7 @@
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                     用户入口层                           │
-│   Streamlit (智能对话 / 工具测试 / 知识库 / 设置)         │
+│   React 18 + Vite (8页: 对话/历史/工具/知识库/监控/评测/设置/登录) │
 └──────────────────────┬──────────────────────────────────┘
                        │ HTTP/SSE
 ┌──────────────────────▼──────────────────────────────────┐
@@ -144,7 +155,7 @@
 │                                                           │
 │  ┌─────────────┐                      ┌──────────────┐   │
 │  │ LLM 规划器   │ ─── 失败降级 ───▶   │ 规则引擎      │   │
-│  │ (通义千问)   │                      │ (关键词匹配)  │   │
+│  │ (DeepSeek)   │                      │ (BM25)         │   │
 │  └─────────────┘                      └──────────────┘   │
 └──────────────────────┬──────────────────────────────────┘
                        │
@@ -164,7 +175,7 @@
 │  │ (向量库)  │  │ (会话缓存)  │  │ (持久化)  │             │
 │  └──────────┘  └───────────┘  └──────────┘             │
 │  ┌──────────┐  ┌───────────┐                           │
-│  │BGE-Small │  │ 通义千问    │                           │
+│  │BGE-Small │  │ DeepSeek    │  BGE-Reranker │           │
 │  │ (Embed)  │  │  (LLM API) │                           │
 │  └──────────┘  └───────────┘                           │
 └──────────────────────────────────────────────────────────┘
@@ -250,7 +261,7 @@ enterprise-ai-office/
 │       ├── request.py              # 请求模型
 │       └── response.py             # 响应模型
 │
-├── frontend/                       # Streamlit 前端
+├── frontend-react/                 # React 18 + Vite 前端
 │   ├── app.py                      # 主入口
 │   ├── pages/
 │   │   ├── chat.py                 # 智能对话页
@@ -304,7 +315,7 @@ langchain-core==0.3.45
 langgraph==0.3.34
 
 # === LLM ===
-# 通义千问通过 OpenAI 兼容接口接入
+# DeepSeek 通过 OpenAI 兼容接口接入
 langchain-openai==0.3.12
 
 # === 向量检索 ===
@@ -450,18 +461,29 @@ docker-compose up -d
 docker-compose ps  # 确认所有服务状态为 healthy
 ```
 
-### 3.4 通义千问 API 配置
+### 3.4 DeepSeek API 配置
 
-1. 访问 [阿里云百炼平台](https://bailian.console.aliyun.com/) 开通服务
+1. 访问 [DeepSeek 开放平台](https://platform.deepseek.com/) 开通服务
 2. 获取 API Key
 3. 创建 `.env` 文件：
 
 ```bash
 # .env
-# === 通义千问 ===
-DASHSCOPE_API_KEY=sk-your-api-key-here
-LLM_MODEL=qwen-plus          # qwen-turbo(快) / qwen-plus(均衡) / qwen-max(强)
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+# === DeepSeek LLM ===
+LLM_API_KEY=sk-your-deepseek-key-here
+LLM_MODEL=deepseek-chat       # deepseek-chat(通用) / deepseek-reasoner(推理)
+LLM_BASE_URL=https://api.deepseek.com
+LLM_TIMEOUT=30
+
+# === SSO/LDAP (可选) ===
+LDAP_ENABLED=false
+LDAP_URL=ldap://ldap.company.com:389
+LDAP_BASE_DN=dc=company,dc=com
+LDAP_USER_DN_TEMPLATE=cn={username},ou=users,dc=company,dc=com
+OIDC_ENABLED=false
+OIDC_ISSUER=https://keycloak.company.com/realms/main
+OIDC_CLIENT_ID=eao-platform
+OIDC_CLIENT_SECRET=
 
 # === 数据库 ===
 REDIS_URL=redis://localhost:6379/0
@@ -3036,10 +3058,32 @@ async def analyze_data(file_path: str, action: str = "summary"):
     return {"result": result}
 ```
 
-### 9.2 Streamlit 前端
+### 9.2 前端 (React 18 + Vite)
 
+主前端为 React SPA (8个页面)，Streamlit 版本保留在 `frontend/` 兼容。
+
+**启动 React 前端:**
+```bash
+cd frontend-react && npm install && npm run dev
+# → http://localhost:5173
+```
+
+**React 技术栈:** Vite + Tailwind CSS v4 + Zustand 状态管理 + React Router v6
+**页面:** 对话 / 历史 / 工具测试 / 知识库 / 监控 / 评测 / 设置 / 登录(SSO多入口)
+
+```typescript
+// frontend-react/src/stores/authStore.ts — 多Provider认证
+export const useAuthStore = create<AuthStore>((set) => ({
+  login: async (username, password) => { /* 本地JWT */ },
+  loginLdap: async (username, password) => { /* LDAP域认证 */ },
+  loginOidc: async () => { /* OIDC SSO跳转 */ },
+  handleOidcCallback: async (code, state) => { /* OIDC回调 */ },
+}));
+```
+
+**Streamlit 兼容版:**
 ```python
-# frontend/app.py
+# frontend/app.py (保留)
 """Streamlit 前端主入口"""
 import streamlit as st
 
@@ -3217,8 +3261,8 @@ def show():
 # 终端 1: 启动 FastAPI 后端
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-# 终端 2: 启动 Streamlit 前端
-streamlit run frontend/app.py --server.port 8501
+# 终端 2: 启动 React 前端
+cd frontend-react && npm run dev  # → http://localhost:5173
 
 # 访问:
 # - API 文档: http://localhost:8000/docs
@@ -3484,7 +3528,7 @@ async def log_requests(request: Request, call_next):
 
 ```bash
 # 部署前确认：
-# ☐ DASHSCOPE_API_KEY — 通义千问 API Key
+# ☐ LLM_API_KEY — DeepSeek API Key
 # ☐ LLM_MODEL — 模型选择 (qwen-turbo / qwen-plus / qwen-max)
 # ☐ MYSQL_ROOT_PASSWORD — MySQL root 密码
 # ☐ MYSQL_PASSWORD — 应用数据库密码
