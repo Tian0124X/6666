@@ -2776,8 +2776,8 @@ class ReflectionHandler:
 ### 9.1 FastAPI 后端
 
 ```python
-# app/main.py
-"""FastAPI 应用入口"""
+# main.py (项目唯一入口)
+"""企业智能办公助手平台 — FastAPI 入口"""
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -3259,7 +3259,7 @@ def show():
 
 ```bash
 # 终端 1: 启动 FastAPI 后端
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 # 终端 2: 启动 React 前端
 cd frontend-react && npm run dev  # → http://localhost:5173
@@ -3507,7 +3507,7 @@ volumes:
 ### 10.3 日志与监控
 
 ```python
-# 在 app/main.py 中添加请求日志中间件
+# 在 main.py 中添加请求日志中间件
 import time
 from fastapi import Request
 
