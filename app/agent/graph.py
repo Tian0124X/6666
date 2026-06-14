@@ -158,20 +158,11 @@ def create_agent_graph(tools: list[BaseTool] | None = None):
     workflow.add_edge("execute", "aggregate")
     workflow.add_edge("aggregate", END)
 
-    # 编译 — SqliteSaver (持久化) / MemorySaver (降级)
-    # 会话 checkpoint 持久化到 SQLite，服务重启不丢失对话上下文
-    try:
-        import os
-        import sqlite3
-        from langgraph.checkpoint.sqlite import SqliteSaver
-        os.makedirs("data", exist_ok=True)
-        conn = sqlite3.connect("data/checkpoints.db", check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
-        logger.info("Checkpointer: SqliteSaver (持久化 → data/checkpoints.db)")
-    except Exception as e:
-        logger.warning(f"SqliteSaver 不可用，降级 MemorySaver: {e}")
-        checkpointer = MemorySaver()
-        logger.info("Checkpointer: MemorySaver (内存)")
+    # 编译 — MemorySaver (开发) / AsyncSqliteSaver (生产)
+    # 开发环境使用 MemorySaver，支持 async stream
+    # 生产部署时替换为 AsyncSqliteSaver 持久化
+    checkpointer = MemorySaver()
+    logger.info("Checkpointer: MemorySaver (开发模式)")
 
     app = workflow.compile(checkpointer=checkpointer)
     logger.info("LangGraph 工作流编译完成")
