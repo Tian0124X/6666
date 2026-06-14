@@ -1,6 +1,7 @@
-"""BGE 向量化模块 — 2026 最佳实践：文档/查询使用不同前缀"""
+"""BGE 向量化模块 — 线程安全懒加载"""
 
 import logging
+import threading
 from typing import List
 from langchain_core.embeddings import Embeddings
 
@@ -11,28 +12,36 @@ class BGEEmbeddings(Embeddings):
     """
     BGE-Small-ZH 向量化，LangChain 兼容封装。
 
-    BGE 模型的关键细节（来自 BAAI 官方文档）：
-    - 文档侧需要加前缀: "为这个句子生成表示以用于检索相关文章："
+    BGE 模型关键细节（BAAI 官方）：
+    - 文档侧加前缀: "为这个句子生成表示以用于检索相关文章："
     - 查询侧不加前缀
-    - 这个差异在 2026 年基准测试中影响 3-5% 的召回率
+    - 差异影响 3-5% 召回率
 
-    模型在首次调用时懒加载（避免 torch 阻塞应用启动）。
+    线程安全：懒加载 + 锁，避免多请求并发加载。
+    lifespan 预热后在 executor 中加载，不阻塞事件循环。
     """
 
     def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5"):
         self.model_name = model_name
         self._model = None
         self._dim = None
+        self._lock = threading.Lock()
 
     @property
     def model(self):
-        """懒加载模型"""
-        if self._model is None:
+        """线程安全懒加载"""
+        if self._model is not None:
+            return self._model
+
+        with self._lock:
+            if self._model is not None:
+                return self._model
             from sentence_transformers import SentenceTransformer
-            logger.info(f"正在加载 BGE 模型: {self.model_name}...")
+            logger.info(f"加载 BGE 模型: {self.model_name} (首次, ~20s)...")
             self._model = SentenceTransformer(self.model_name)
             self._dim = self._model.get_embedding_dimension()
-            logger.info(f"BGE 模型就绪 (维度: {self._dim})")
+            logger.info(f"BGE 模型就绪 ({self._dim}维)")
+
         return self._model
 
     @property

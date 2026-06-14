@@ -54,8 +54,37 @@ _token_bucket = TokenBucket(rate=30, burst=60)
 async def lifespan(app: FastAPI):
     logger.info("🚀 企业智能办公助手平台启动中...")
     logger.info(f"   环境: {settings.APP_ENV}  模型: {settings.LLM_MODEL}  限流: 30 req/s")
+
+    # 预热模型：后台线程加载 BGE + Reranker，避免首次请求阻塞
+    import asyncio
+    loop = asyncio.get_running_loop()
+
+    async def _warmup():
+        """在 executor 中加载模型，不阻塞事件循环"""
+        await loop.run_in_executor(None, _load_models)
+        logger.info("✅ 模型预热完成")
+
+    asyncio.create_task(_warmup())
     yield
     logger.info("👋 应用关闭")
+
+
+def _load_models():
+    """同步加载所有模型（在 executor 线程中运行）"""
+    try:
+        from app.rag.embedder import BGEEmbeddings
+        embedder = BGEEmbeddings()
+        _ = embedder.model  # 触发 SentenceTransformer 下载/加载
+        logger.info(f"  BGE Embedding 就绪 ({embedder.dimension}维)")
+    except Exception as e:
+        logger.warning(f"  BGE 加载失败: {e}")
+
+    try:
+        from app.rag.retriever import _get_reranker
+        _get_reranker()
+        logger.info("  BGE Reranker 就绪")
+    except Exception as e:
+        logger.warning(f"  Reranker 加载失败: {e}")
 
 
 app = FastAPI(
