@@ -119,10 +119,10 @@ class MonitoringStore:
             req_data = await r.lrange("mon:recent_requests", 0, -1)
             if req_data and not self.recent_requests:
                 for item in req_data:
-                try:
-                    self.recent_requests.append(json.loads(item))
-                except Exception:
-                    pass
+                    try:
+                        self.recent_requests.append(json.loads(item))
+                    except Exception:
+                        pass
 
             # start_time
             saved_start = await r.get("mon:start_time")
