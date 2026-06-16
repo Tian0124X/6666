@@ -290,7 +290,8 @@ def analyze_with_llm(file_path: str, question: str) -> dict:
 
 class DataChatInput(BaseModel):
     file_path: str = Field(description="Excel/CSV 文件路径")
-    question: str = Field(description="自然语言数据分析问题，如 '哪个产品销售额最高？'")
+    question: str = Field(default="", description="自然语言数据分析问题")
+    query: str = Field(default="", description="问题的别名 (兼容 LLM 生成)")
 
 
 @register_tool
@@ -303,8 +304,10 @@ class DataConversationTool(BaseTool):
     )
     args_schema: type[BaseModel] = DataChatInput
 
-    def _run(self, file_path: str, question: str) -> str:
-        result = analyze_with_llm(file_path, question)
+    def _run(self, file_path: str, question: str = "", query: str = "") -> str:
+        # 兼容 LLM 可能传 query 或 question
+        q = question or query or ""
+        result = analyze_with_llm(file_path, q)
         answer = result["answer"]
         if result.get("code"):
             answer += f"\n\n📝 执行代码:\n```python\n{result['code']}\n```"

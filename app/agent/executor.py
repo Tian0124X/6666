@@ -27,7 +27,8 @@ async def execute_single(
         status: "ok" | "failed" | "fixed"
     """
     task_id = task["task_id"]
-    params = dict(task.get("tool_params", {}))
+    # 兼容 LLM 生成的 "params" 和规则引擎的 "tool_params"
+    params = dict(task.get("tool_params") or task.get("params") or {})
 
     # 注入前置任务结果
     for dep_id in task.get("depends_on", []):
@@ -101,14 +102,16 @@ async def execute_node(state: AgentState, tools: list[BaseTool]) -> dict:
             task = tasks.get(task_id)
             if not task:
                 continue
-            tool = next((t for t in tools if t.name == task["tool_name"]), None)
+            tool_name = task.get("tool_name") or task.get("tool", "")
+            tool = next((t for t in tools if t.name == tool_name), None)
             if tool:
                 layer_tasks.append(
                     execute_single(task, tool, sub_results, reflection)
                 )
             else:
-                logger.warning(f"工具未注册: {task['tool_name']} (task {task_id})")
-                sub_results[task_id] = f"[failed] 工具 '{task['tool_name']}' 未注册"
+                tool_name = task.get("tool_name") or task.get("tool", "unknown")
+                logger.warning(f"工具未注册: {tool_name} (task {task_id})")
+                sub_results[task_id] = f"[failed] 工具 '{tool_name}' 未注册"
 
         if not layer_tasks:
             continue
