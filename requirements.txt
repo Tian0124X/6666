@@ -63,3 +63,4 @@ ldap3>=2.9.0
 pytest>=9.0.0
 pytest-asyncio>=0.23.0
 pytest-mock>=3.0.0
+ragas>=0.2  # RAGAS评测 (Python<3.14)

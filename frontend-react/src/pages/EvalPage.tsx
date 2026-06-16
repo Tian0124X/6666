@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   Beaker, Play, Loader2, CheckCircle2, XCircle,
   Target, Clock, BarChart3, TrendingUp,
@@ -7,6 +7,10 @@ import {
 interface RAGEvalResult {
   id: string; question: string; recall: number;
   passed: boolean; latency_ms: number;
+  faithfulness?: number | null;
+  answer_relevancy?: number | null;
+  context_precision?: number | null;
+  context_recall?: number | null;
 }
 interface AgentEvalResult {
   id: string; task: string; expected: string;
@@ -20,8 +24,13 @@ interface EvalSummary {
 
 export default function EvalPage() {
   const [ragResult, setRagResult] = useState<{
+    mode?: string;
     accuracy: number; avg_recall: number; avg_latency_ms: number;
     passed: number; total: number; details: RAGEvalResult[];
+    avg_faithfulness?: number | null;
+    avg_answer_relevancy?: number | null;
+    avg_context_precision?: number | null;
+    avg_context_recall?: number | null;
   } | null>(null);
   const [agentResult, setAgentResult] = useState<{
     tool_accuracy: number; avg_latency_ms: number;
@@ -30,14 +39,16 @@ export default function EvalPage() {
   const [summary, setSummary] = useState<EvalSummary | null>(null);
   const [loading, setLoading] = useState("");
 
+  const [ragMode, setRagMode] = useState<"fast" | "ragas">("fast");
+
   const runRagEval = useCallback(async () => {
     setLoading("rag");
     try {
-      const res = await fetch("/api/eval/rag", { method: "POST" });
+      const res = await fetch(`/api/eval/rag?mode=${ragMode}`, { method: "POST" });
       setRagResult(await res.json());
     } catch { /* ignore */ }
     setLoading("");
-  }, []);
+  }, [ragMode]);
 
   const runAgentEval = useCallback(async () => {
     setLoading("agent");
@@ -54,6 +65,9 @@ export default function EvalPage() {
       setSummary(await res.json());
     } catch { /* ignore */ }
   }, []);
+
+  // 页面加载时自动获取总览
+  useEffect(() => { fetchSummary(); }, [fetchSummary]);
 
   return (
     <div className="h-screen flex flex-col">
@@ -86,21 +100,31 @@ export default function EvalPage() {
           <div className="grid grid-cols-2 gap-6">
             {/* RAG Eval */}
             <div className="bg-[var(--color-card)] border border-[var(--color-border)] rounded-xl p-6">
-              <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
                 <h3 className="font-medium flex items-center gap-2">
                   📚 RAG 评测
                   <span className="text-xs text-[var(--color-muted-foreground)]">
-                    (10 条测试集 · 关键词召回)
+                    (10 条测试集)
                   </span>
                 </h3>
-                <button
-                  onClick={runRagEval}
-                  disabled={loading === "rag"}
-                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                >
-                  {loading === "rag" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-                  运行评测
-                </button>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={ragMode}
+                    onChange={(e) => setRagMode(e.target.value as "fast" | "ragas")}
+                    className="px-2 py-1 rounded border border-[var(--color-border)] bg-[var(--color-card)] text-xs"
+                  >
+                    <option value="fast">⚡ 快速</option>
+                    <option value="ragas">🎯 RAGAS 标准</option>
+                  </select>
+                  <button
+                    onClick={runRagEval}
+                    disabled={loading === "rag"}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                  >
+                    {loading === "rag" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                    运行
+                  </button>
+                </div>
               </div>
 
               {ragResult && (
@@ -110,6 +134,15 @@ export default function EvalPage() {
                     <MiniStat label="平均召回" value={`${(ragResult.avg_recall * 100).toFixed(0)}%`} target="≥85%" ok={ragResult.avg_recall >= 0.85} />
                     <MiniStat label="平均延迟" value={`${ragResult.avg_latency_ms.toFixed(0)}ms`} target="<2s" ok={ragResult.avg_latency_ms < 2000} />
                   </div>
+                  {/* RAGAS Metrics */}
+                  {ragResult.mode === "ragas" && ragResult.avg_faithfulness != null && (
+                    <div className="grid grid-cols-4 gap-2 mb-4">
+                      <RagasBadge label="Faithfulness" value={ragResult.avg_faithfulness!} target={0.7} />
+                      <RagasBadge label="Answer Relevancy" value={ragResult.avg_answer_relevancy!} target={0.7} />
+                      <RagasBadge label="Context Precision" value={ragResult.avg_context_precision!} target={0.7} />
+                      <RagasBadge label="Context Recall" value={ragResult.avg_context_recall!} target={0.7} />
+                    </div>
+                  )}
                   <div className="space-y-1 max-h-60 overflow-auto">
                     {ragResult.details.map((r) => (
                       <div key={r.id} className="flex items-center gap-2 text-xs py-1 border-b border-[var(--color-border)] last:border-0">
@@ -148,7 +181,7 @@ export default function EvalPage() {
                 <>
                   <div className="grid grid-cols-3 gap-3 mb-4">
                     <MiniStat label="工具准确率" value={`${(agentResult.tool_accuracy * 100).toFixed(0)}%`} target="≥80%" ok={agentResult.tool_accuracy >= 0.8} />
-                    <MiniStat label="匹配数" value={`${agentResult.tool_match_count}/${agentResult.total}`} target="" ok={agentResult.tool_match_count >= 4} />
+                    <MiniStat label="匹配数" value={`${agentResult.tool_match_count}/${agentResult.total}`} target="" ok={agentResult.tool_match_count >= agentResult.total * 0.8} />
                     <MiniStat label="平均延迟" value={`${agentResult.avg_latency_ms.toFixed(0)}ms`} target="<500ms" ok={agentResult.avg_latency_ms < 500} />
                   </div>
                   <div className="space-y-1 max-h-60 overflow-auto">
@@ -182,6 +215,16 @@ function ScoreCard({ icon, label, value, color }: { icon: React.ReactNode; label
       <div className={`w-8 h-8 rounded-lg flex items-center justify-center mb-2 ${colors[color]}`}>{icon}</div>
       <p className="text-2xl font-bold">{value}</p>
       <p className="text-xs text-[var(--color-muted-foreground)]">{label}</p>
+    </div>
+  );
+}
+
+function RagasBadge({ label, value, target }: { label: string; value: number; target: number }) {
+  const ok = value >= target;
+  return (
+    <div className={`rounded-lg p-2 text-center ${ok ? "bg-green-50 dark:bg-green-900/20" : "bg-red-50 dark:bg-red-900/20"}`}>
+      <p className="text-[10px] text-[var(--color-muted-foreground)]">{label}</p>
+      <p className={`text-sm font-bold ${ok ? "text-green-700" : "text-red-700"}`}>{(value * 100).toFixed(0)}%</p>
     </div>
   );
 }
