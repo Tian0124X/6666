@@ -162,6 +162,9 @@ async def chat_stream(req: ChatRequest):
                     msgs.append(AIMessage(content=m.content))
         msgs.append(HumanMessage(content=req.message))
 
+        from app.api.analytics import track_event
+        track_event("chat_start", req.user_id, req.session_id)
+
         full_answer = ""
         try:
             app = get_agent_app()
@@ -183,6 +186,7 @@ async def chat_stream(req: ChatRequest):
             }
 
             # 使用 astream_events 获取实时事件流
+            total_tokens = 0
             async for event in app.astream_events(initial, config, version="v2"):
                 kind = event.get("event", "")
                 if kind == "on_chat_model_stream":
@@ -190,12 +194,22 @@ async def chat_stream(req: ChatRequest):
                     if chunk and hasattr(chunk, "content") and chunk.content:
                         full_answer += chunk.content
                         yield f"data: {json.dumps({'content': chunk.content}, ensure_ascii=False)}\n\n"
+                    # 提取 token 用量 (LangGraph/LangChain usage_metadata)
+                    if chunk and hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                        total_tokens = chunk.usage_metadata.get("total_tokens", total_tokens)
 
                 elif kind == "on_custom_event":
                     name = event.get("name", "")
                     if name == "tool_start":
                         tool_name = event.get("data", {}).get("name", "")
+                        from app.api.monitoring import track_tool_call
+                        track_tool_call(tool_name)
                         yield f"data: {json.dumps({'status': f'🔧 调用工具: {tool_name}...'}, ensure_ascii=False)}\n\n"
+
+            # 记录 token 消耗
+            if total_tokens > 0:
+                from app.api.monitoring import track_token_usage
+                track_token_usage(total_tokens)
 
             # 如果 astream_events 没有产生流式输出（降级），回退到直接调用
             if not full_answer:
@@ -208,6 +222,9 @@ async def chat_stream(req: ChatRequest):
         except Exception as e:
             logger.error(f"流式错误: {e}", exc_info=True)
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+        from app.api.analytics import track_event
+        track_event("chat_end", req.user_id, req.session_id, {"has_answer": bool(full_answer)})
 
         await memory.add_message(req.session_id, req.user_id, "user", req.message)
         if full_answer:

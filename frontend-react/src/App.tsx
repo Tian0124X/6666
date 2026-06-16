@@ -10,6 +10,7 @@ import MonitoringPage from "./pages/MonitoringPage";
 import EvalPage from "./pages/EvalPage";
 import HistoryPage from "./pages/HistoryPage";
 import SettingsPage from "./pages/SettingsPage";
+import AnalyticsPage from "./pages/AnalyticsPage";
 import LoginPage from "./pages/LoginPage";
 
 function ThemeInit() {
@@ -53,6 +54,7 @@ export default function App() {
           <Route path="knowledge" element={<KnowledgePage />} />
           <Route path="monitoring" element={<MonitoringPage />} />
           <Route path="eval" element={<EvalPage />} />
+          <Route path="analytics" element={<AnalyticsPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

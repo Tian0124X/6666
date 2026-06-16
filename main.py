@@ -131,8 +131,12 @@ async def log_requests(request: Request, call_next):
     return response
 
 
+# 监控统计中间件 — 记录请求统计到内存 + Redis
+from app.api.monitoring import track_request
+app.middleware("http")(track_request)
+
 # ====== 路由 ======
-from app.api import chat, knowledge, tools, monitoring, auth, eval
+from app.api import chat, knowledge, tools, monitoring, auth, eval, analytics
 
 app.include_router(chat.router, prefix="/api")
 app.include_router(knowledge.router, prefix="/api/knowledge")
@@ -140,6 +144,7 @@ app.include_router(tools.router, prefix="/api/tools")
 app.include_router(monitoring.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(eval.router, prefix="/api")
+app.include_router(analytics.router, prefix="/api")
 
 
 @app.get("/", tags=["系统"])

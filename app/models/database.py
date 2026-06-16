@@ -40,6 +40,34 @@ class TaskHistory(Base):
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
 
+class EvalRecord(Base):
+    """评测记录 ORM 模型 — 持久化 RAG/Agent 评测结果"""
+    __tablename__ = "eval_records"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    eval_type = Column(String(20), nullable=False, index=True)  # "rag" | "agent"
+    accuracy = Column(String(20), nullable=False)  # "0.850" 精度分数
+    avg_recall = Column(String(20), nullable=True)  # RAG 专用
+    tool_accuracy = Column(String(20), nullable=True)  # Agent 专用
+    avg_latency_ms = Column(String(20), nullable=False)
+    passed = Column(Integer, default=0)
+    total = Column(Integer, default=0)
+    details_json = Column(Text, nullable=True)  # JSON string
+    created_at = Column(TIMESTAMP, server_default=func.now())
+
+
+class AnalyticsEvent(Base):
+    """业务分析事件 — 用户行为追踪"""
+    __tablename__ = "analytics_events"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    event_type = Column(String(32), nullable=False, index=True)  # chat_start/chat_end/tool_call/rag_query/knowledge_upload/user_login
+    user_id = Column(String(64), nullable=False, index=True)
+    session_id = Column(String(64), nullable=True)
+    data_json = Column(JSON, nullable=True)  # 事件附加数据
+    created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
+
+
 # 全局引擎/会话 (懒加载，失败后不再重试)
 _engine = None
 _engine_failed = False

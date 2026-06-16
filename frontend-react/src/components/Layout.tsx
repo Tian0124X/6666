@@ -14,6 +14,7 @@ import {
   Bot,
   LogOut,
   User,
+  Zap,
 } from "lucide-react";
 
 const nav = [
@@ -22,6 +23,7 @@ const nav = [
   { to: "/tools", icon: Wrench, label: "工具测试" },
   { to: "/knowledge", icon: BookOpen, label: "知识库" },
   { to: "/monitoring", icon: Activity, label: "监控面板" },
+  { to: "/analytics", icon: Zap, label: "深度分析" },
   { to: "/eval", icon: Beaker, label: "自动化评测" },
   { to: "/settings", icon: Settings, label: "偏好设置" },
 ];

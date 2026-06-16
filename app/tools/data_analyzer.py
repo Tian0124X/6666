@@ -128,7 +128,8 @@ class DataAnalyzerTool(BaseTool):
             data = df[col].value_counts().head(10)
             ax.pie(data.values, labels=data.index, autopct="%1.1f%%")
             ax.set_title(f"{col} 占比 (饼图)")
-        else:  # scatter
+        else:  # 未知图表类型 → 回退为散点图
+            logger.warning(f"未知图表类型 '{chart_type}'，回退为散点图")
             if len(numeric_cols) >= 2:
                 ax.scatter(df[numeric_cols[0]], df[numeric_cols[1]], alpha=0.5)
                 ax.set_xlabel(numeric_cols[0])
@@ -137,7 +138,10 @@ class DataAnalyzerTool(BaseTool):
             else:
                 return None
 
-        chart_path = os.path.join(output_dir, f"chart_{safe_col}_{safe_type}.png")
+        chart_path = os.path.join(
+            output_dir,
+            f"chart_{safe_col}_{safe_type}_{pd.Timestamp.now().strftime('%H%M%S_%f')}.png"
+        )
         plt.tight_layout()
         fig.savefig(chart_path, dpi=150)
         plt.close(fig)
@@ -175,7 +179,7 @@ class DataAnalyzerTool(BaseTool):
 
         report_path = os.path.join(
             output_dir,
-            f"report_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.docx",
+            f"report_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S_%f')}.docx",
         )
         doc.save(report_path)
         return report_path

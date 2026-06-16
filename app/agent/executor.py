@@ -35,6 +35,10 @@ async def execute_single(
             params[f"{dep_id}_result"] = dep_results[dep_id]
 
     try:
+        from app.api.monitoring import track_tool_call
+        from app.api.analytics import track_event
+        track_tool_call(tool.name)
+        track_event("tool_call", "system", "", {"tool": tool.name, "task_id": task_id})
         result = await tool.ainvoke(params)
         return task_id, "ok", str(result)
     except Exception as e:
@@ -52,6 +56,8 @@ async def execute_single(
         )
         if fixed_params:
             try:
+                from app.api.monitoring import track_tool_call
+                track_tool_call(tool.name)
                 result = await tool.ainvoke(fixed_params)
                 return task_id, "fixed", str(result)
             except Exception as e2:
@@ -61,6 +67,8 @@ async def execute_single(
         category = categorize_error(e)
         if category in (ErrorCategory.TIMEOUT, ErrorCategory.NETWORK):
             try:
+                from app.api.monitoring import track_tool_call
+                track_tool_call(tool.name)
                 result = await tool.ainvoke(params)
                 return task_id, "ok", str(result)
             except Exception as e2:
