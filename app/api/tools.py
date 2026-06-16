@@ -7,6 +7,7 @@ from app.tools.base import registry
 
 # 触发工具自动注册
 import app.tools.data_analyzer  # noqa
+import app.tools.data_conversation  # noqa
 import app.tools.oa_crm  # noqa
 import app.tools.knowledge_search  # noqa
 
@@ -61,3 +62,39 @@ async def crm_query(action: str = "list_customers", value: str | None = None):
         raise HTTPException(status_code=503, detail="crm_query 工具未注册")
     result = await asyncio.to_thread(tool._run, action=action, value=value)
     return {"result": result}
+
+
+# ====== 数据对话 ======
+
+from pydantic import BaseModel as PydanticBaseModel
+
+class DataChatRequest(PydanticBaseModel):
+    file_path: str
+    question: str
+    session_id: str = "default"
+
+class DataChatResponse(PydanticBaseModel):
+    answer: str
+    code: str = ""
+    result: dict | None = None
+    chart: dict | None = None
+
+
+@router.post("/data-chat", response_model=DataChatResponse, tags=["工具"])
+async def data_chat(req: DataChatRequest):
+    """
+    LLM 驱动的自然语言数据分析。
+    上传 Excel/CSV 后用自然语言提问，LLM 生成 pandas 代码执行并返回结果。
+    """
+    from app.tools.data_conversation import analyze_with_llm
+    import asyncio
+
+    result = await asyncio.to_thread(
+        analyze_with_llm, file_path=req.file_path, question=req.question
+    )
+    return DataChatResponse(
+        answer=result["answer"],
+        code=result["code"],
+        result=result["result"],
+        chart=result["chart"],
+    )

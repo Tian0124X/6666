@@ -90,6 +90,10 @@ export const toolsApi = {
   crm: (action = "list_customers", value?: string) =>
     request<{ result: string }>(`/tools/crm?action=${action}&value=${encodeURIComponent(value || "")}`,
       { method: "POST" }),
+  dataChat: (file_path: string, question: string, session_id = "default") =>
+    request<{ answer: string; code: string; result: Record<string, unknown> | null; chart: Record<string, unknown> | null }>(
+      "/tools/data-chat", { method: "POST", body: JSON.stringify({ file_path, question, session_id }) }
+    ),
 };
 
 // === Knowledge API ===
@@ -121,6 +125,25 @@ export const knowledgeApi = {
   rebuildIndex: (dir = "data/documents") =>
     request<Record<string, unknown>>(`/knowledge/index/rebuild?directory=${encodeURIComponent(dir)}`,
       { method: "POST" }),
+};
+
+// === Analytics API ===
+export const analyticsApi = {
+  overview: () => request<{
+    today: { dau: number; requests: number; success_rate: number; avg_latency_ms: number; avg_rating: number | null; errors: number };
+    knowledge: Record<string, number>;
+    tools: { total_calls: number };
+    performance: { latest_eval_accuracy: string | null; latest_eval_at: string | null };
+  }>("/analytics/overview"),
+  trends: (days = 7) => request<{ trends: { date: string; total: number; chat_start?: number; chat_end?: number }[]; days: number }>(
+    `/analytics/trends?days=${days}`
+  ),
+  knowledge: () => request<{ rag_queries_today: number; top_tools: Record<string, number>; cache_hit_rate: number }>(
+    "/analytics/knowledge"
+  ),
+  performance: () => request<{ p50: number; p95: number; p99: number; min: number; max: number; samples: number }>(
+    "/analytics/performance"
+  ),
 };
 
 // === System API ===
