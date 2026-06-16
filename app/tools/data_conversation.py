@@ -176,21 +176,30 @@ def _parse_llm_response(response: str) -> dict:
     """解析 LLM 响应，提取文字解读 + 代码 + 图表配置"""
     result = {"answer": "", "code": "", "chart": None}
 
-    # 提取 SPEC:CODE: 标记
-    code_match = re.search(r'SPEC:CODE:\s*\n?(.*?)(?:SPEC:CHART:|$)', response, re.DOTALL)
-    if code_match:
-        result["code"] = code_match.group(1).strip()
-        result["answer"] = response[:code_match.start()].strip()
-    else:
-        result["answer"] = response.strip()
-
-    # 提取 SPEC:CHART: 标记
-    chart_match = re.search(r'SPEC:CHART:\s*(\{.*?\})', response, re.DOTALL)
+    # 1. 提取 SPEC:CHART: — 用贪婪匹配处理嵌套JSON
+    chart_match = re.search(r'SPEC:CHART:\s*(\{.+\})\s*$', response, re.DOTALL)
+    if not chart_match:
+        chart_match = re.search(r'SPEC:CHART:\s*(\{.+\})', response, re.DOTALL)
     if chart_match:
         try:
             result["chart"] = json.loads(chart_match.group(1))
         except json.JSONDecodeError:
-            logger.warning(f"图表配置解析失败: {chart_match.group(1)}")
+            logger.warning(f"图表JSON解析失败: {chart_match.group(1)[:100]}")
+
+    # 2. 提取 SPEC:CODE: — 匹配到行尾或 SPEC:CHART:
+    code_match = re.search(r'SPEC:CODE:\s*\n?(.+?)(?:SPEC:CHART:|$)', response, re.DOTALL)
+    if code_match:
+        result["code"] = code_match.group(1).strip()
+
+    # 3. 清理答案: 移除所有 SPEC: 标记及后面的内容
+    answer = response
+    # 先移除 SPEC:CHART 行
+    answer = re.sub(r'\n*SPEC:CHART:\s*\{.+\}.*$', '', answer, flags=re.DOTALL)
+    # 再移除 SPEC:CODE 行及后面的代码
+    answer = re.sub(r'\n*SPEC:CODE:.*$', '', answer, flags=re.DOTALL)
+    # 移除 "以下是生成上述分析结果的代码" 之类引导语
+    answer = re.sub(r'\n*以下是生成.*代码[：:]*\s*$', '', answer)
+    result["answer"] = answer.strip()
 
     return result
 
