@@ -153,7 +153,7 @@ def _build_df_info(df: pd.DataFrame) -> str:
     lines = [f"- 行数: {len(df)}, 列数: {len(df.columns)}"]
     lines.append("- 列名及类型:")
     for col in df.columns:
-        dtype = str(df.dtype[col])
+        dtype = str(df[col].dtype)
         sample = df[col].dropna().head(3).tolist()
         sample_str = ", ".join(str(x)[:50] for x in sample)
         nulls = df[col].isna().sum()
