@@ -146,27 +146,44 @@ async def chat_stream(req: ChatRequest):
             user_question = re.sub(r'\[已上传数据文件:\s*[^\]]+\]\s*', '', req.message).strip()
             user_question = user_question.replace('用户问题:', '').strip() or "请分析这份数据"
 
+            logger.info(f"数据快速通道: file={file_path}, question={user_question[:80]}")
+
             import asyncio
             from app.tools.data_conversation import analyze_with_llm
 
             yield f"data: {json.dumps({'status': '正在分析数据...'}, ensure_ascii=False)}\n\n"
 
-            result = await asyncio.to_thread(analyze_with_llm, file_path, user_question)
+            try:
+                result = await asyncio.to_thread(analyze_with_llm, file_path, user_question)
+            except Exception as e:
+                logger.error(f"数据分析失败: {e}", exc_info=True)
+                yield f"data: {json.dumps({'content': f'数据分析失败: {e}'}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'done': True})}\n\n"
+                return
 
-            # 发送文本答案
+            # 发送文本答案 (按段落拆分, 避免截断markdown)
             answer_text = result.get("answer", "")
-            for i in range(0, len(answer_text), 100):
-                chunk = answer_text[i:i+100]
-                yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+            paragraphs = answer_text.split('\n')
+            current = ""
+            for para in paragraphs:
+                current += para + '\n'
+                if len(current) >= 200:
+                    yield f"data: {json.dumps({'content': current}, ensure_ascii=False)}\n\n"
+                    current = ""
+            if current:
+                yield f"data: {json.dumps({'content': current}, ensure_ascii=False)}\n\n"
 
-            # 发送结构化数据 (表格/图表)
-            if result.get("result") and result["result"].get("type") != "error":
-                r = result["result"]
-                data_event = {"type": "data_result", "code": result.get("code", "")}
+            # 发送结构化数据 (表格/图表/代码)
+            code = result.get("code", "")
+            r = result.get("result")
+            if r and r.get("type") != "error":
+                data_event = {"type": "data_result", "code": code}
                 if r["type"] == "dataframe":
                     data_event["table"] = {"columns": r.get("columns", []), "rows": r.get("rows", []), "shape": r.get("shape", [0, 0])}
                 elif r["type"] == "scalar":
                     data_event["scalar"] = r.get("value")
+                elif r["type"] == "series":
+                    data_event["scalar"] = json.dumps(r.get("data", {}), ensure_ascii=False)
                 if result.get("chart"):
                     data_event["chart"] = result["chart"]
                 yield f"data: {json.dumps(data_event, ensure_ascii=False)}\n\n"
