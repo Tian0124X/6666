@@ -80,7 +80,6 @@ export default function ChatPage() {
         (chunk) => updateLastAssistant(chunk),
         () => {
           setStreaming(false);
-          // Show rating after assistant finishes
           setShowRating(true);
           useChatStore.setState((s) => {
             const msgs = [...s.messages];
@@ -96,6 +95,25 @@ export default function ChatPage() {
         (err) => {
           setStreaming(false);
           updateLastAssistant(`\n\n❌ 错误: ${err}`);
+        },
+        (data) => {
+          // 接收结构化数据 (表格/图表/代码)
+          const dr: { type: string; columns?: string[]; rows?: unknown[][]; shape?: number[]; value?: unknown; chart?: Record<string, unknown> } | null = data.table
+            ? { type: "dataframe", columns: data.table.columns, rows: data.table.rows, shape: data.table.shape }
+            : data.chart
+            ? { type: "chart", chart: data.chart }
+            : data.scalar != null
+            ? { type: "scalar", value: data.scalar }
+            : null;
+          const store = useChatStore.getState();
+          const msgs = [...store.messages];
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            if (msgs[i].role === "assistant") {
+              msgs[i] = { ...msgs[i], code: data.code, dataResult: dr || undefined };
+              break;
+            }
+          }
+          useChatStore.setState({ messages: msgs });
         }
       );
       abortRef.current = ctrl;
