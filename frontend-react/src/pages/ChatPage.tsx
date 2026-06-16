@@ -25,6 +25,8 @@ export default function ChatPage() {
   const abortRef = useRef<AbortController | null>(null);
   const [showRating, setShowRating] = useState(false);
   const [approval, setApproval] = useState<{ thread_id: string; action: string; description: string; details: Record<string,unknown> } | null>(null);
+  const [dataFilePath, setDataFilePath] = useState("");
+  const [dataFileName, setDataFileName] = useState("");
 
   // 轮询人类审批 (10s间隔，已有弹窗时跳过)
   useEffect(() => {
@@ -56,7 +58,15 @@ export default function ChatPage() {
 
   const handleSend = useCallback(
     (text: string) => {
-      addMessage({ role: "user", content: text });
+      // 如果附加了数据文件，构建带文件上下文的消息
+      let displayText = text;
+      let sendText = text;
+      if (dataFilePath) {
+        displayText = `📊 [数据文件: ${dataFileName}]\n${text}`;
+        sendText = `[已上传数据文件: ${dataFilePath}]\n用户问题: ${text}`;
+      }
+
+      addMessage({ role: "user", content: displayText });
       const assistantMsg: Omit<ChatMessage, "id"> = {
         role: "assistant",
         content: "",
@@ -66,7 +76,7 @@ export default function ChatPage() {
       setStreaming(true);
 
       const ctrl = streamChat(
-        { message: text, user_id: userId },
+        { message: sendText, user_id: userId },
         (chunk) => updateLastAssistant(chunk),
         () => {
           setStreaming(false);
@@ -90,7 +100,7 @@ export default function ChatPage() {
       );
       abortRef.current = ctrl;
     },
-    [addMessage, setStreaming, updateLastAssistant]
+    [addMessage, setStreaming, updateLastAssistant, dataFilePath, dataFileName]
   );
 
   const handleStop = () => {
@@ -171,6 +181,9 @@ export default function ChatPage() {
         onSend={handleSend}
         onStop={handleStop}
         isStreaming={isStreaming}
+        onDataFile={(filePath, fileName) => { setDataFilePath(filePath); setDataFileName(fileName); }}
+        dataFileName={dataFileName}
+        onClearDataFile={() => { setDataFilePath(""); setDataFileName(""); }}
         onImage={(file, question, answer) => {
           addMessage({
             role: "user",

@@ -1,4 +1,7 @@
-"""规则引擎降级 — LLM 不可用时的预定义计划模板"""
+"""规则引擎降级 — LLM 不可用时的预定义计划模板
+
+2026: 支持数据对话 — 从消息中提取文件路径并路由到 data_conversation
+"""
 
 import re
 
@@ -13,6 +16,12 @@ PREDEFINED_PLANS = {
     "data_analysis": {
         "tasks": [
             {"task_id": "task_1", "description": "分析数据", "tool_name": "data_analyzer", "tool_params": {"action": "analyze"}, "depends_on": []},
+        ],
+        "execution_order": [["task_1"]],
+    },
+    "data_conversation": {
+        "tasks": [
+            {"task_id": "task_1", "description": "数据对话分析", "tool_name": "data_conversation", "tool_params": {}, "depends_on": []},
         ],
         "execution_order": [["task_1"]],
     },
@@ -37,6 +46,9 @@ PREDEFINED_PLANS = {
 }
 
 RULE_TABLE = [
+    # 数据对话: 检测已上传文件标记 → 优先使用 data_conversation
+    (r"\[已上传数据文件:\s*([^\]]+)\][\s\S]*?(?:分析|统计|查看|显示|计算|对比|画|图表|趋势|分布|汇总|排名|排序|筛选|过滤|最大|最小|平均|求和|多少|几个|哪个|什么|怎么|如何)",
+     "data_conversation"),
     (r"分析.*生成.*报告|数据.*报告|报表|生成.*报告", "data_report"),
     (r"分析.*数据|数据.*分析|统计|图表", "data_analysis"),
     (r"审批|OA|请假|报销|出差", "oa_query"),
@@ -45,8 +57,21 @@ RULE_TABLE = [
 ]
 
 
+def extract_file_path(user_input: str) -> str | None:
+    """从消息中提取已上传文件的路径"""
+    m = re.search(r"\[已上传数据文件:\s*([^\]]+)\]", user_input)
+    return m.group(1).strip() if m else None
+
+
 def rule_based_plan(user_input: str) -> dict:
+    """规则匹配计划，如果检测到文件路径则注入 tool_params"""
     for pattern, plan_key in RULE_TABLE:
         if re.search(pattern, user_input):
-            return PREDEFINED_PLANS[plan_key]
+            plan = dict(PREDEFINED_PLANS[plan_key])  # 浅拷贝
+            # 数据对话: 注入 file_path
+            if plan_key == "data_conversation":
+                fp = extract_file_path(user_input)
+                if fp and plan.get("tasks"):
+                    plan["tasks"][0]["tool_params"]["file_path"] = fp
+            return plan
     return PREDEFINED_PLANS["knowledge_qa"]

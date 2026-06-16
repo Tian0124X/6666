@@ -1,18 +1,22 @@
 import { useState, useRef } from "react";
-import { Send, Square, ImagePlus, Loader2 } from "lucide-react";
+import { Send, Square, ImagePlus, FileSpreadsheet, Loader2, X } from "lucide-react";
 
 interface Props {
   onSend: (msg: string) => void;
   onImage?: (file: File, question: string, result: string) => void;
+  onDataFile?: (filePath: string, fileName: string) => void;
   onStop?: () => void;
   isStreaming: boolean;
   disabled?: boolean;
+  dataFileName?: string;
+  onClearDataFile?: () => void;
 }
 
-export function ChatInput({ onSend, onImage, onStop, isStreaming, disabled }: Props) {
+export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, disabled, dataFileName, onClearDataFile }: Props) {
   const [input, setInput] = useState("");
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const dataFileRef = useRef<HTMLInputElement>(null);
 
   const handleSubmit = () => {
     const trimmed = input.trim();
@@ -38,24 +42,49 @@ export function ChatInput({ onSend, onImage, onStop, isStreaming, disabled }: Pr
     if (fileRef.current) fileRef.current.value = "";
   };
 
+  const handleDataFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !onDataFile) return;
+    setUploading(true);
+    try {
+      const { knowledgeApi } = await import("../lib/api");
+      const res = await knowledgeApi.upload(file);
+      const uploadedName = res.filename || file.name;
+      const safeName = uploadedName.replace(/\.\./g, '').replace(/[\\/]/g, '');
+      onDataFile(`data/documents/${safeName}`, file.name);
+    } catch { /* ignore */ }
+    setUploading(false);
+    if (dataFileRef.current) dataFileRef.current.value = "";
+  };
+
   return (
     <div className="border-t border-border bg-card p-4">
+      {/* Data file indicator */}
+      {dataFileName && (
+        <div className="max-w-4xl mx-auto mb-2 flex items-center gap-2 px-1">
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-primary/10 text-primary text-xs font-medium">
+            <FileSpreadsheet className="w-3 h-3" />
+            {dataFileName}
+            <button onClick={onClearDataFile} className="ml-1 hover:bg-primary/20 rounded p-0.5">
+              <X className="w-3 h-3" />
+            </button>
+          </span>
+          <span className="text-xs text-muted-foreground">已附加，可直接提问分析</span>
+        </div>
+      )}
       <div className="flex gap-3 max-w-4xl mx-auto">
         {/* Image upload */}
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          onChange={handleImageUpload}
-          className="hidden"
-        />
-        <button
-          onClick={() => fileRef.current?.click()}
-          disabled={disabled || uploading}
-          className="px-3 py-3 rounded-xl border border-border hover:bg-accent transition-colors disabled:opacity-50"
-          title="上传图片"
-        >
+        <input ref={fileRef} type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+        <button onClick={() => fileRef.current?.click()} disabled={disabled || uploading}
+          className="px-3 py-3 rounded-xl border border-border hover:bg-accent transition-colors disabled:opacity-50" title="上传图片">
           {uploading ? <Loader2 className="w-5 h-5 animate-spin" /> : <ImagePlus className="w-5 h-5" />}
+        </button>
+
+        {/* Data file upload (Excel/CSV) */}
+        <input ref={dataFileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleDataFileUpload} className="hidden" />
+        <button onClick={() => dataFileRef.current?.click()} disabled={disabled || uploading}
+          className="px-3 py-3 rounded-xl border border-border hover:bg-accent transition-colors disabled:opacity-50" title="上传Excel/CSV数据文件">
+          <FileSpreadsheet className="w-5 h-5" />
         </button>
 
         <input
