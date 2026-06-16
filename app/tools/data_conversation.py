@@ -313,24 +313,19 @@ class DataConversationTool(BaseTool):
         q = question or query or ""
         result = analyze_with_llm(file_path, q)
         answer = result["answer"]
-        if result.get("code"):
-            answer += f"\n\n📝 执行代码:\n```python\n{result['code']}\n```"
-        if result.get("result") and result["result"].get("type") != "error":
-            r = result["result"]
-            if r["type"] == "scalar":
-                val_str = str(r['value'])
-                # 截断 base64 图片数据，防止撑爆对话
-                if 'base64' in val_str and len(val_str) > 500:
-                    val_str = val_str[:200] + f"\n... [base64数据已截断, 原始长度{len(val_str)}字符]"
-                if len(val_str) > 2000:
-                    val_str = val_str[:1000] + f"\n... [已截断, 原始长度{len(val_str)}字符]"
-                answer += f"\n\n📊 结果: {val_str}"
-            elif r["type"] == "dataframe":
-                answer += f"\n\n📊 结果表格 ({r.get('shape', [0,0])[0]} 行 × {r.get('shape', [0,0])[1]} 列)"
-            elif r["type"] == "series":
-                answer += f"\n\n📊 结果序列: {json.dumps(r.get('data', {}), ensure_ascii=False)}"
-        elif result.get("result") and result["result"].get("type") == "error":
-            answer += f"\n\n⚠️ 执行错误: {result['result']['error']}"
-        if result.get("chart"):
-            answer += f"\n\n📈 图表已生成: {json.dumps(result['chart'], ensure_ascii=False)}"
+
+        # 错误信息直接展示
+        if result.get("result") and result["result"].get("type") == "error":
+            answer += f"\n\n⚠️ {result['result']['error']}"
+        elif result.get("result") and result["result"].get("type") == "scalar":
+            val_str = str(result["result"]["value"])
+            if 'base64' in val_str and len(val_str) > 500:
+                val_str = val_str[:200] + "\n... [图片数据已自动省略]"
+            elif len(val_str) > 500:
+                val_str = val_str[:500] + "..."
+            answer += f"\n\n**结果:** {val_str}"
+
+        # 代码和分析过程不输出到对话 (仅用于内部)
+        # 表格/图表由 SSE data_result 事件单独推送
+
         return answer

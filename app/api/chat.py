@@ -137,6 +137,51 @@ async def chat_stream(req: ChatRequest):
 
     async def event_generator():
         memory = await get_memory_store()
+
+        # ====== 快速通道: 数据文件分析 ======
+        import re
+        file_match = re.search(r'\[已上传数据文件:\s*([^\]]+)\]', req.message)
+        if file_match:
+            file_path = file_match.group(1).strip()
+            user_question = re.sub(r'\[已上传数据文件:\s*[^\]]+\]\s*', '', req.message).strip()
+            user_question = user_question.replace('用户问题:', '').strip() or "请分析这份数据"
+
+            import asyncio
+            from app.tools.data_conversation import analyze_with_llm
+
+            yield f"data: {json.dumps({'status': '正在分析数据...'}, ensure_ascii=False)}\n\n"
+
+            result = await asyncio.to_thread(analyze_with_llm, file_path, user_question)
+
+            # 发送文本答案
+            answer_text = result.get("answer", "")
+            for i in range(0, len(answer_text), 100):
+                chunk = answer_text[i:i+100]
+                yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+
+            # 发送结构化数据 (表格/图表)
+            if result.get("result") and result["result"].get("type") != "error":
+                r = result["result"]
+                data_event = {"type": "data_result", "code": result.get("code", "")}
+                if r["type"] == "dataframe":
+                    data_event["table"] = {"columns": r.get("columns", []), "rows": r.get("rows", []), "shape": r.get("shape", [0, 0])}
+                elif r["type"] == "scalar":
+                    data_event["scalar"] = r.get("value")
+                if result.get("chart"):
+                    data_event["chart"] = result["chart"]
+                yield f"data: {json.dumps(data_event, ensure_ascii=False)}\n\n"
+
+            yield f"data: {json.dumps({'done': True})}\n\n"
+
+            # 保存对话记录
+            await memory.add_message(req.session_id, req.user_id, "user", req.message)
+            await memory.add_message(req.session_id, req.user_id, "assistant", answer_text)
+
+            from app.api.analytics import track_event
+            track_event("chat_end", req.user_id, req.session_id, {"has_answer": True, "route": "data_fast"})
+            return
+
+        # ====== 标准通道: Agent 对话 ======
         history = memory.get_history(req.session_id, req.user_id)
 
         # 构建对话历史消息 (长对话自动压缩)

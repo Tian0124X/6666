@@ -26,7 +26,8 @@ export function streamChat(
   body: { message: string; session_id?: string; user_id?: string },
   onChunk: (text: string) => void,
   onDone: () => void,
-  onError: (err: string) => void
+  onError: (err: string) => void,
+  onData?: (data: { code?: string; table?: { columns: string[]; rows: unknown[][]; shape: number[] }; chart?: Record<string, unknown>; scalar?: unknown }) => void
 ): AbortController {
   const controller = new AbortController();
 
@@ -56,6 +57,15 @@ export function streamChat(
             if (data.content) onChunk(data.content);
             if (data.done) onDone();
             if (data.error) onError(data.error);
+            // 富文本数据: 表格/图表/代码
+            if (data.type === "data_result" && onData) {
+              onData({
+                code: data.code,
+                table: data.table,
+                chart: data.chart,
+                scalar: data.scalar,
+              });
+            }
           } catch { /* skip malformed JSON */ }
         }
       }
