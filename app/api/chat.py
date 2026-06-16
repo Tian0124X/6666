@@ -198,6 +198,41 @@ async def chat_stream(req: ChatRequest):
             track_event("chat_end", req.user_id, req.session_id, {"has_answer": True, "route": "data_fast"})
             return
 
+        # ====== 兜底: 数据问题但没上传文件 ======
+        import re as re2
+        if re2.search(r'(分析|统计|图表|报表|数据|趋势|汇总|对比)', req.message) and not file_match:
+            import os
+            demo = "data/documents/商品数据明细_豆包AI生成.xlsx"
+            if os.path.exists(demo):
+                logger.info(f"数据问题无文件, 使用示例: {demo}")
+                yield f"data: {json.dumps({'status': '未检测到上传文件，正在使用示例数据...'}, ensure_ascii=False)}\n\n"
+                # 走快速通道
+                import asyncio as aio2
+                from app.tools.data_conversation import analyze_with_llm
+                try:
+                    result = await aio2.to_thread(analyze_with_llm, demo, req.message)
+                    answer_text = result.get("answer", "")
+                    for i in range(0, len(answer_text), 200):
+                        yield f"data: {json.dumps({'content': answer_text[i:i+200]}, ensure_ascii=False)}\n\n"
+                    r = result.get("result")
+                    if r and r.get("type") != "error":
+                        de = {"type": "data_result", "code": result.get("code", "")}
+                        if r["type"] == "dataframe":
+                            de["table"] = {"columns": r["columns"], "rows": r["rows"], "shape": r.get("shape", [0,0])}
+                        if result.get("chart"):
+                            de["chart"] = result["chart"]
+                        yield f"data: {json.dumps(de, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'done': True})}\n\n"
+                    await memory.add_message(req.session_id, req.user_id, "user", req.message)
+                    await memory.add_message(req.session_id, req.user_id, "assistant", answer_text)
+                    return
+                except Exception as e:
+                    logger.error(f"示例数据分析失败: {e}")
+            else:
+                yield f"data: {json.dumps({'content': '请先上传 Excel/CSV 数据文件再提问。点击输入框左侧的 📊 按钮上传。'}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'done': True})}\n\n"
+                return
+
         # ====== 标准通道: Agent 对话 ======
         history = memory.get_history(req.session_id, req.user_id)
 

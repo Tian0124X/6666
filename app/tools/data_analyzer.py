@@ -21,7 +21,7 @@ plt.rcParams["axes.unicode_minus"] = False
 
 class DataAnalyzerInput(BaseModel):
     """入参 schema（Pydantic 严格校验）"""
-    file_path: str = Field(description="Excel/CSV 文件的绝对路径")
+    file_path: str = Field(default="", description="Excel/CSV 文件路径，留空则使用示例文件")
     action: Literal["summary", "analyze", "full_report"] = Field(
         default="summary",
         description="summary=概览统计 | analyze=深度分析+图表 | full_report=生成 Word 报告",
@@ -188,12 +188,20 @@ class DataAnalyzerTool(BaseTool):
 
     def _run(
         self,
-        file_path: str,
+        file_path: str = "",
         action: str = "summary",
         target_column: Optional[str] = None,
         chart_type: Optional[str] = None,
     ) -> str:
         try:
+            # 没传文件: 尝试默认示例文件
+            if not file_path:
+                demo = "data/documents/商品数据明细_豆包AI生成.xlsx"
+                if os.path.exists(demo):
+                    file_path = demo
+                else:
+                    return "❌ 请先上传数据文件 (Excel/CSV)，或使用智能对话中的 📊 按钮上传后直接提问。"
+
             # 安全校验
             safe_path = validate_file_path(file_path)
             if not os.path.exists(safe_path):

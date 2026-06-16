@@ -97,19 +97,26 @@ export default function ChatPage() {
           updateLastAssistant(`\n\n❌ 错误: ${err}`);
         },
         (data) => {
-          // 接收结构化数据 (表格/图表/代码)
-          const dr: { type: string; columns?: string[]; rows?: unknown[][]; shape?: number[]; value?: unknown; chart?: Record<string, unknown> } | null = data.table
-            ? { type: "dataframe", columns: data.table.columns, rows: data.table.rows, shape: data.table.shape }
-            : data.chart
-            ? { type: "chart", chart: data.chart }
-            : data.scalar != null
-            ? { type: "scalar", value: data.scalar }
-            : null;
+          // 接收结构化数据 — 表格和图表可以同时存在
+          const dr: Record<string, unknown> = {};
+          if (data.table) {
+            dr.type = "dataframe";
+            dr.columns = data.table.columns;
+            dr.rows = data.table.rows;
+            dr.shape = data.table.shape;
+          }
+          if (data.chart) {
+            dr.chart = data.chart;
+          }
+          if (data.scalar != null) {
+            dr.type = dr.type || "scalar";
+            dr.value = data.scalar;
+          }
           const store = useChatStore.getState();
           const msgs = [...store.messages];
           for (let i = msgs.length - 1; i >= 0; i--) {
             if (msgs[i].role === "assistant") {
-              msgs[i] = { ...msgs[i], code: data.code, dataResult: dr || undefined };
+              msgs[i] = { ...msgs[i], code: data.code, dataResult: Object.keys(dr).length > 0 ? dr as ChatMessage['dataResult'] : undefined };
               break;
             }
           }
