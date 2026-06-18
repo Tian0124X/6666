@@ -56,6 +56,33 @@ class EvalRecord(Base):
     created_at = Column(TIMESTAMP, server_default=func.now())
 
 
+class ConversationSummary(Base):
+    """对话摘要 ORM — 情景记忆管线"""
+    __tablename__ = "conversation_summaries"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    session_id = Column(String(64), nullable=False, index=True)
+    user_id = Column(String(64), nullable=False, index=True)
+    summary_json = Column(Text, nullable=False)  # JSON: {summary, key_topics, decisions, ...}
+    is_final = Column(Integer, default=0)  # 1=最终摘要
+    created_at = Column(TIMESTAMP, server_default=func.now())
+
+
+class UserFact(Base):
+    """用户事实 ORM — 语义记忆"""
+    __tablename__ = "user_facts"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id = Column(String(64), nullable=False, index=True)
+    fact_text = Column(String(512), nullable=False)
+    category = Column(String(32), default="general")  # preference, fact, context, skill
+    confidence = Column(String(8), default="0.5")  # 0.0-1.0
+    source_session_id = Column(String(64), nullable=True)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    last_accessed_at = Column(TIMESTAMP, nullable=True)
+    access_count = Column(Integer, default=0)
+
+
 class AnalyticsEvent(Base):
     """业务分析事件 — 用户行为追踪"""
     __tablename__ = "analytics_events"
@@ -66,6 +93,36 @@ class AnalyticsEvent(Base):
     session_id = Column(String(64), nullable=True)
     data_json = Column(JSON, nullable=True)  # 事件附加数据
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
+
+
+class UserRecord(Base):
+    """用户记录 ORM 模型 — JWT 持久化"""
+    __tablename__ = "users"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    username = Column(String(64), unique=True, nullable=False, index=True)
+    password_hash = Column(String(256), nullable=False)
+    display_name = Column(String(128), default="")
+    role = Column(String(20), default="user")  # admin, user, guest
+    sso_provider = Column(String(20), nullable=True)  # ldap, oidc, null=local
+    email = Column(String(256), default="")
+    department = Column(String(128), default="")
+    is_active = Column(Integer, default=1)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    last_login_at = Column(TIMESTAMP, nullable=True)
+
+
+class SessionRecord(Base):
+    """会话记录 ORM 模型 — 多会话管理"""
+    __tablename__ = "sessions"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    session_id = Column(String(64), unique=True, nullable=False, index=True)
+    user_id = Column(String(64), nullable=False, index=True)
+    name = Column(String(128), default="新对话")
+    is_archived = Column(Integer, default=0)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
 
 # 全局引擎/会话 (懒加载，失败后不再重试)

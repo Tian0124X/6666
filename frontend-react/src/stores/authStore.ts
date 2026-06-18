@@ -14,10 +14,24 @@ export interface AuthProvider {
   fields: string[];
 }
 
+function saveAuth(access_token: string, refresh_token: string, user: User) {
+  localStorage.setItem("auth_token", access_token);
+  if (refresh_token) localStorage.setItem("auth_refresh", refresh_token);
+  localStorage.setItem("auth_user", JSON.stringify(user));
+}
+
+function clearAuth() {
+  localStorage.removeItem("auth_token");
+  localStorage.removeItem("auth_refresh");
+  localStorage.removeItem("auth_user");
+}
+
 interface AuthStore {
   user: User | null;
   token: string | null;
+  refreshToken: string | null;
   isLoggedIn: boolean;
+  isRestoring: boolean;  // 初始化中，避免闪烁跳转 /login
   providers: AuthProvider[];
   login: (username: string, password: string) => Promise<void>;
   loginLdap: (username: string, password: string) => Promise<void>;
@@ -26,15 +40,18 @@ interface AuthStore {
   register: (username: string, password: string, displayName: string) => Promise<void>;
   logout: () => void;
   restore: () => void;
+  refreshAuth: () => Promise<boolean>;
   fetchProviders: () => Promise<void>;
 }
 
 const API = "/api/auth";
 
-export const useAuthStore = create<AuthStore>((set) => ({
+export const useAuthStore = create<AuthStore>((set, get) => ({
   user: null,
   token: null,
+  refreshToken: null,
   isLoggedIn: false,
+  isRestoring: true,  // 启动时先显示 loading，等 restore 完成再判断
   providers: [{ id: "local", name: "本地账号登录", description: "", enabled: true, fields: ["username", "password"] }],
 
   login: async (username, password) => {
@@ -48,9 +65,8 @@ export const useAuthStore = create<AuthStore>((set) => ({
       throw new Error(err.detail || "登录失败");
     }
     const data = await res.json();
-    localStorage.setItem("auth_token", data.access_token);
-    localStorage.setItem("auth_user", JSON.stringify(data.user));
-    set({ token: data.access_token, user: data.user, isLoggedIn: true });
+    saveAuth(data.access_token, data.refresh_token || "", data.user);
+    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true });
   },
 
   loginLdap: async (username, password) => {
@@ -64,9 +80,8 @@ export const useAuthStore = create<AuthStore>((set) => ({
       throw new Error(err.detail || "LDAP 登录失败");
     }
     const data = await res.json();
-    localStorage.setItem("auth_token", data.access_token);
-    localStorage.setItem("auth_user", JSON.stringify(data.user));
-    set({ token: data.access_token, user: data.user, isLoggedIn: true });
+    saveAuth(data.access_token, data.refresh_token || "", data.user);
+    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true });
   },
 
   loginOidc: async () => {
@@ -91,9 +106,8 @@ export const useAuthStore = create<AuthStore>((set) => ({
       throw new Error(err.detail || "SSO 登录失败");
     }
     const data = await res.json();
-    localStorage.setItem("auth_token", data.access_token);
-    localStorage.setItem("auth_user", JSON.stringify(data.user));
-    set({ token: data.access_token, user: data.user, isLoggedIn: true });
+    saveAuth(data.access_token, data.refresh_token || "", data.user);
+    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true });
   },
 
   register: async (username, password, displayName) => {
@@ -107,28 +121,48 @@ export const useAuthStore = create<AuthStore>((set) => ({
       throw new Error(err.detail || "注册失败");
     }
     const data = await res.json();
-    localStorage.setItem("auth_token", data.access_token);
-    localStorage.setItem("auth_user", JSON.stringify(data.user));
-    set({ token: data.access_token, user: data.user, isLoggedIn: true });
+    saveAuth(data.access_token, data.refresh_token || "", data.user);
+    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true });
   },
 
   logout: () => {
-    localStorage.removeItem("auth_token");
-    localStorage.removeItem("auth_user");
+    clearAuth();
     fetch(`${API}/logout`, { method: "POST", headers: authHeader() }).catch(() => {});
-    set({ token: null, user: null, isLoggedIn: false });
+    set({ token: null, refreshToken: null, user: null, isLoggedIn: false });
   },
 
   restore: () => {
     const token = localStorage.getItem("auth_token");
+    const refresh = localStorage.getItem("auth_refresh") || "";
     const user = localStorage.getItem("auth_user");
     if (token && user) {
       try {
-        set({ token, user: JSON.parse(user), isLoggedIn: true });
+        set({ token, refreshToken: refresh, user: JSON.parse(user), isLoggedIn: true, isRestoring: false });
       } catch {
-        localStorage.removeItem("auth_token");
-        localStorage.removeItem("auth_user");
+        clearAuth();
+        set({ isRestoring: false });
       }
+    } else {
+      set({ isRestoring: false });
+    }
+  },
+
+  refreshAuth: async () => {
+    const refresh = get().refreshToken || localStorage.getItem("auth_refresh");
+    if (!refresh) return false;
+    try {
+      const res = await fetch(`${API}/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: refresh }),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      saveAuth(data.access_token, data.refresh_token || "", data.user);
+      set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true });
+      return true;
+    } catch {
+      return false;
     }
   },
 

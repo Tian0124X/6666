@@ -105,11 +105,22 @@ export function streamChat(
 
 // === Chat API ===
 export const chatApi = {
-  send: (msg: string, sessionId = "default", userId = "anonymous") =>
+  send: (msg: string, sessionId = "default") =>
     request<{ answer: string; task_type: string }>("/chat", {
       method: "POST",
-      body: JSON.stringify({ message: msg, session_id: sessionId, user_id: userId }),
+      body: JSON.stringify({ message: msg, session_id: sessionId }),
     }),
+};
+
+// === Sessions API ===
+export const sessionsApi = {
+  list: () => request<{ sessions: { session_id: string; user_id?: string; name: string; message_count: number; started_at?: string; updated_at?: string; created_at?: string }[]; total: number }>("/sessions"),
+  create: (name?: string) => {
+    const params = name ? `?name=${encodeURIComponent(name)}` : "";
+    return request<{ session: { session_id: string; user_id: string; name: string; message_count: number; created_at: string } }>(`/sessions${params}`, { method: "POST" });
+  },
+  delete: (sessionId: string) => request<{ status: string }>(`/sessions/${sessionId}`, { method: "DELETE" }),
+  rename: (sessionId: string, name: string) => request<{ status: string }>(`/sessions/${sessionId}?name=${encodeURIComponent(name)}`, { method: "PATCH" }),
 };
 
 // === Tools API ===

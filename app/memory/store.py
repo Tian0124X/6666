@@ -11,6 +11,7 @@ import logging
 from typing import List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
+from sqlalchemy import text as sa_text
 
 from app.config import settings
 
@@ -238,6 +239,39 @@ class MemoryStore:
             loop.run_in_executor(None, _mysql_save, session_id, user_id, role, content)
         except RuntimeError:
             _mysql_save(session_id, user_id, role, content)
+
+    # ---- 会话枚举 ----
+
+    async def list_user_session_ids(self, user_id: str) -> list[str]:
+        """列出某用户在 Redis 中的所有 session_id"""
+        ids = set()
+        redis = _get_redis()
+        if redis:
+            try:
+                for key in redis.scan_iter(f"chat:{user_id}:*"):
+                    sid = key.split(":", 2)[-1]
+                    if sid:
+                        ids.add(sid)
+            except Exception:
+                pass
+
+        # 也查 MySQL
+        from app.models.database import get_session, ConversationRecord
+        sess = get_session()
+        if sess:
+            try:
+                rows = sess.execute(
+                    sa_text("SELECT DISTINCT session_id FROM conversations WHERE user_id = :uid"),
+                    {"uid": user_id},
+                ).fetchall()
+                for row in rows:
+                    ids.add(row[0])
+            except Exception:
+                pass
+            finally:
+                sess.close()
+
+        return sorted(ids, reverse=True)
 
     # ---- 清空 ----
 

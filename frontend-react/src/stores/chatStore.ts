@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { sessionsApi, authHeader } from "../stores/authStore";
 
 export interface ChartConfig {
   type: "bar" | "line" | "pie" | "scatter";
@@ -31,28 +32,69 @@ export interface ChatMessage {
   agents?: string[];
   code?: string;
   dataResult?: DataResult;
-  dataFilePath?: string;  // current data file path for report download
+  dataFilePath?: string;
+}
+
+export interface SessionSummary {
+  session_id: string;
+  user_id?: string;
+  name: string;
+  message_count: number;
+  started_at?: string;
+  updated_at?: string;
+  created_at?: string;
+  preview?: string;
 }
 
 interface ChatStore {
   messages: ChatMessage[];
   isStreaming: boolean;
-  sessionId: string;
+
+  // Session management (统一使用 activeSessionId)
+  sessions: SessionSummary[];
+  activeSessionId: string;
+  sessionsLoaded: boolean;
+
   addMessage: (msg: Omit<ChatMessage, "id">) => void;
   updateLastAssistant: (content: string) => void;
   setLastAssistantData: (data: { code?: string; dataResult?: DataResult }) => void;
   setStreaming: (v: boolean) => void;
   clearMessages: () => void;
+
+  // Session actions
+  loadSessions: () => Promise<void>;
+  createSession: (name?: string) => Promise<string>;
+  switchSession: (sessionId: string) => Promise<void>;
+  deleteSession: (sessionId: string) => Promise<void>;
+  renameSession: (sessionId: string, name: string) => Promise<void>;
+  ensureSession: () => Promise<string>;
+
+  // Internal
+  _switchAbort: AbortController | null;
 }
 
-export const useChatStore = create<ChatStore>((set) => ({
+const MAX_MESSAGES = 500; // 从 100 提升到 500，避免长对话丢失
+
+export const useChatStore = create<ChatStore>((set, get) => ({
   messages: [],
   isStreaming: false,
-  sessionId: "default",
+  sessions: [],
+  activeSessionId: "default",
+  sessionsLoaded: false,
+  _switchAbort: null,
+
   addMessage: (msg) =>
-    set((s) => ({
-      messages: [...s.messages.slice(-99), { ...msg, id: crypto.randomUUID() }],
-    })),
+    set((s) => {
+      const msgs = [...s.messages.slice(-(MAX_MESSAGES - 1)), { ...msg, id: crypto.randomUUID() }];
+      // 同步更新 session 的 message_count
+      const sessions = s.sessions.map((ss) =>
+        ss.session_id === s.activeSessionId
+          ? { ...ss, message_count: msgs.length }
+          : ss
+      );
+      return { messages: msgs, sessions };
+    }),
+
   updateLastAssistant: (content) =>
     set((s) => {
       const msgs = [...s.messages];
@@ -64,6 +106,7 @@ export const useChatStore = create<ChatStore>((set) => ({
       }
       return { messages: msgs };
     }),
+
   setLastAssistantData: (data) =>
     set((s) => {
       const msgs = [...s.messages];
@@ -75,6 +118,106 @@ export const useChatStore = create<ChatStore>((set) => ({
       }
       return { messages: msgs };
     }),
+
   setStreaming: (v) => set({ isStreaming: v }),
   clearMessages: () => set({ messages: [] }),
+
+  // ====== Session management ======
+
+  loadSessions: async () => {
+    try {
+      const data = await sessionsApi.list();
+      set({ sessions: data.sessions, sessionsLoaded: true });
+    } catch (e) {
+      console.warn("加载会话列表失败:", e);
+    }
+  },
+
+  createSession: async (name) => {
+    try {
+      const data = await sessionsApi.create(name);
+      const sid = data.session.session_id;
+      set((s) => ({
+        sessions: [data.session, ...s.sessions],
+        activeSessionId: sid,
+        messages: [],
+      }));
+      return sid;
+    } catch (e) {
+      console.warn("创建会话失败:", e);
+      return get().activeSessionId;
+    }
+  },
+
+  switchSession: async (sessionId) => {
+    // 取消之前的切换请求 (防竞态)
+    const prev = get()._switchAbort;
+    if (prev) prev.abort();
+    const ctrl = new AbortController();
+    set({ _switchAbort: ctrl, activeSessionId: sessionId, messages: [] });
+
+    try {
+      const res = await fetch(`/api/chat/history/${sessionId}`, {
+        headers: { ...authHeader() },
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      // 竞态保护: 确认 sessionId 仍然是当前活跃的
+      if (get().activeSessionId !== sessionId) return;
+      const msgs = (data.messages || []).map((m: { role: string; content: string }) => ({
+        id: crypto.randomUUID(),
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      }));
+      set({ messages: msgs });
+    } catch (e: any) {
+      if (e.name === "AbortError") return; // 被取消，正常
+      console.warn("加载会话消息失败:", e);
+    }
+  },
+
+  deleteSession: async (sessionId) => {
+    try {
+      await sessionsApi.delete(sessionId);
+      set((s) => {
+        const sessions = s.sessions.filter((ss) => ss.session_id !== sessionId);
+        const activeSessionId = s.activeSessionId === sessionId
+          ? (sessions[0]?.session_id || "default")
+          : s.activeSessionId;
+        const messages = s.activeSessionId === sessionId ? [] : s.messages;
+        return { sessions, activeSessionId, messages };
+      });
+    } catch (e) {
+      console.warn("删除会话失败:", e);
+    }
+  },
+
+  renameSession: async (sessionId, name) => {
+    try {
+      await sessionsApi.rename(sessionId, name);
+      set((s) => ({
+        sessions: s.sessions.map((ss) =>
+          ss.session_id === sessionId ? { ...ss, name } : ss
+        ),
+      }));
+    } catch (e) {
+      console.warn("重命名失败:", e);
+    }
+  },
+
+  ensureSession: async () => {
+    const { activeSessionId, sessionsLoaded, loadSessions, createSession } = get();
+    if (!sessionsLoaded) await loadSessions();
+    const { sessions } = get();
+    if (activeSessionId === "default" || !sessions.find((s) => s.session_id === activeSessionId)) {
+      if (sessions.length > 0) {
+        const sid = sessions[0].session_id;
+        await get().switchSession(sid);
+        return sid;
+      }
+      return await createSession();
+    }
+    return activeSessionId;
+  },
 }));

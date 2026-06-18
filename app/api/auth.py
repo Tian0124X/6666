@@ -1,15 +1,20 @@
-"""认证 API — 登录/注册/登出/用户信息 + SSO/LDAP/OIDC"""
+"""认证 API — 登录/注册/登出/用户信息 + SSO/LDAP/OIDC + refresh token"""
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.models.user import (
     LoginRequest, RegisterRequest, TokenResponse, UserInfo,
-    authenticate, create_user, get_user_by_token, logout,
+    authenticate, create_user, get_user_by_token, logout, refresh_access_token,
 )
 from pydantic import BaseModel
 
 router = APIRouter()
 security = HTTPBearer(auto_error=False)
+
+
+# ====== 角色顺序 ======
+
+ROLE_ORDER = {"admin": 3, "user": 2, "guest": 1}
 
 
 # ====== JWT 依赖注入 ======
@@ -18,12 +23,12 @@ security = HTTPBearer(auto_error=False)
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> UserInfo:
-    """从 Bearer token 解析当前用户。未登录返回匿名用户"""
+    """从 Bearer token 解析当前用户。未登录返回匿名用户（向后兼容）"""
     if credentials:
         user = get_user_by_token(credentials.credentials)
         if user:
             return UserInfo(**user)
-    # 未登录：返回匿名用户（向后兼容）
+    # 未登录：返回匿名用户
     return UserInfo(username="anonymous", display_name="访客", role="guest")
 
 
@@ -38,6 +43,18 @@ async def require_user(
     raise HTTPException(status_code=401, detail="请先登录")
 
 
+def require_role(min_role: str):
+    """依赖工厂：要求用户拥有 min_role 或更高权限。
+
+    用法: `user: UserInfo = Depends(require_role("admin"))`
+    """
+    async def checker(user: UserInfo = Depends(require_user)) -> UserInfo:
+        if ROLE_ORDER.get(user.role, 0) < ROLE_ORDER.get(min_role, 0):
+            raise HTTPException(status_code=403, detail="权限不足")
+        return user
+    return checker
+
+
 # ====== Pydantic 模型 ======
 
 class OidcCallbackRequest(BaseModel):
@@ -50,35 +67,42 @@ class LdapLoginRequest(BaseModel):
     password: str
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 # ====== 端点 ======
 
 
 @router.post("/auth/login", response_model=TokenResponse, tags=["认证"])
 async def login(req: LoginRequest):
-    """本地用户登录"""
-    token = authenticate(req.username, req.password)
-    if not token:
+    """本地用户登录 — 返回 JWT access_token + refresh_token"""
+    result = authenticate(req.username, req.password)
+    if not result:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
 
-    user = get_user_by_token(token)
     return TokenResponse(
-        access_token=token,
-        user=UserInfo(**user),
+        access_token=result["access_token"],
+        refresh_token=result["refresh_token"],
+        user=UserInfo(**result["user"]),
     )
 
 
 @router.post("/auth/register", response_model=TokenResponse, tags=["认证"])
 async def register(req: RegisterRequest):
-    """用户注册"""
-    result = create_user(req.username, req.password, req.display_name)
-    if not result:
+    """用户注册 + 自动登录"""
+    created = create_user(req.username, req.password, req.display_name)
+    if not created:
         raise HTTPException(status_code=409, detail="用户名已存在")
 
-    token = authenticate(req.username, req.password)
-    user = get_user_by_token(token)
+    result = authenticate(req.username, req.password)
+    if not result:
+        raise HTTPException(status_code=500, detail="注册成功但登录失败，请重试")
+
     return TokenResponse(
-        access_token=token,
-        user=UserInfo(**user),
+        access_token=result["access_token"],
+        refresh_token=result["refresh_token"],
+        user=UserInfo(**result["user"]),
     )
 
 
@@ -86,7 +110,7 @@ async def register(req: RegisterRequest):
 async def logout_endpoint(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ):
-    """登出"""
+    """登出 — 将 JWT 加入黑名单"""
     if credentials:
         logout(credentials.credentials)
     return {"status": "ok", "message": "已登出"}
@@ -94,8 +118,22 @@ async def logout_endpoint(
 
 @router.get("/auth/me", response_model=UserInfo, tags=["认证"])
 async def get_me(user: UserInfo = Depends(require_user)):
-    """获取当前用户信息"""
+    """获取当前用户信息（需要登录）"""
     return user
+
+
+@router.post("/auth/refresh", response_model=TokenResponse, tags=["认证"])
+async def refresh(req: RefreshRequest):
+    """用 refresh token 换新 access token (rotation)"""
+    result = refresh_access_token(req.refresh_token)
+    if not result:
+        raise HTTPException(status_code=401, detail="refresh token 无效或已过期")
+
+    return TokenResponse(
+        access_token=result["access_token"],
+        refresh_token=result["refresh_token"],
+        user=UserInfo(**result["user"]),
+    )
 
 
 # ====== 认证方式列表 ======
@@ -136,7 +174,8 @@ async def ldap_login(req: LdapLoginRequest):
         raise HTTPException(status_code=500, detail="创建 SSO 用户失败")
 
     return TokenResponse(
-        access_token=result["token"],
+        access_token=result["access_token"],
+        refresh_token=result["refresh_token"],
         user=UserInfo(
             username=result["username"],
             display_name=result["display_name"],
@@ -188,7 +227,8 @@ async def oidc_callback(req: OidcCallbackRequest):
         raise HTTPException(status_code=500, detail="创建 SSO 用户失败")
 
     return TokenResponse(
-        access_token=result["token"],
+        access_token=result["access_token"],
+        refresh_token=result["refresh_token"],
         user=UserInfo(
             username=result["username"],
             display_name=result["display_name"],

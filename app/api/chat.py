@@ -1,13 +1,13 @@
-"""对话 API — 接入 LangGraph Agent 引擎 + 会话历史管理
+"""对话 API — 接入 LangGraph Agent 引擎 + 会话历史管理 + 多用户隔离
 
-2026 优化: 长对话自动摘要压缩, O(1) 上下文窗口
+2026 优化: 长对话自动摘要压缩, O(1) 上下文窗口; 所有端点强制 require_user
 """
 
 import json
 import os
 import logging
 from typing import List
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse, FileResponse
 from app.config import settings
 from app.models.request import ChatRequest
@@ -16,6 +16,8 @@ from app.agent.graph import run_agent
 from app.agent.router import classify_task
 from app.memory.store import get_memory_store
 from app.tools.image_analyzer import save_uploaded_image, analyze_image, is_image_file
+from app.models.user import UserInfo
+from app.api.auth import require_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -79,13 +81,14 @@ def _compress_history(history: list) -> str:
 
 
 @router.post("/chat", response_model=ChatResponse, tags=["对话"])
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, user: UserInfo = Depends(require_user)):
     """
     对话接口 — 自动路由简单/复杂任务，调用 LangGraph Agent 引擎。
+    需要登录。user_id 从 Bearer token 推导，忽略请求体中的 user_id。
     """
     try:
         memory = await get_memory_store()
-        history = memory.get_history(req.session_id, req.user_id)
+        history = memory.get_history(req.session_id, user.username)
 
         # 构建带上下文的输入 (长对话自动压缩)
         if history:
@@ -98,7 +101,7 @@ async def chat(req: ChatRequest):
         task_type = classify_task(full_input) or "simple"
 
         # 执行: complex 任务使用多Agent协作
-        thread_id = f"{req.user_id}:{req.session_id}"
+        thread_id = f"{user.username}:{req.session_id}"
         agents_used = []
 
         if task_type == "complex":
@@ -114,8 +117,8 @@ async def chat(req: ChatRequest):
             answer = await run_agent(full_input, thread_id=thread_id)
 
         # 存储对话
-        await memory.add_message(req.session_id, req.user_id, "user", req.message)
-        await memory.add_message(req.session_id, req.user_id, "assistant", answer)
+        await memory.add_message(req.session_id, user.username, "user", req.message)
+        await memory.add_message(req.session_id, user.username, "assistant", answer)
 
         return ChatResponse(answer=answer, task_type=task_type)
     except Exception as e:
@@ -127,10 +130,11 @@ async def chat(req: ChatRequest):
 
 
 @router.post("/chat/stream", tags=["对话"])
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, user: UserInfo = Depends(require_user)):
     """
     流式对话 — SSE 实时推送，通过 LangGraph Agent 引擎。
     使用 LangGraph astream_events() 获取 token 级流式输出。
+    需要登录。user_id 从 Bearer token 推导。
     """
     from app.agent.graph import get_agent_app
     from app.agent.state import AgentState
@@ -178,11 +182,11 @@ async def chat_stream(req: ChatRequest):
 
             yield f"data: {json.dumps({'done': True})}\n\n"
 
-            await memory.add_message(req.session_id, req.user_id, "user", req.message)
-            await memory.add_message(req.session_id, req.user_id, "assistant", answer_text)
+            await memory.add_message(req.session_id, user.username, "user", req.message)
+            await memory.add_message(req.session_id, user.username, "assistant", answer_text)
 
             from app.api.analytics import track_event
-            track_event("chat_end", req.user_id, req.session_id, {"has_answer": True, "route": route_label})
+            track_event("chat_end", user.username, req.session_id, {"has_answer": True, "route": route_label})
 
         # ====== 统一意图路由 ======
         from app.agent.intent import (
@@ -196,7 +200,7 @@ async def chat_stream(req: ChatRequest):
 
         logger.info(
             f"意图路由: {intent.primary.value} conf={intent.confidence} "
-            f"has_file={has_file} | {req.message[:60]}..."
+            f"has_file={has_file} user={user.username} | {req.message[:60]}..."
         )
 
         # --- 数据对话通道: data_analysis / data_report ---
@@ -255,15 +259,22 @@ async def chat_stream(req: ChatRequest):
         # (所有非数据意图统一走 Agent，Agent 内部按工具描述自动选择)
 
         # ====== 标准通道: Agent 对话 ======
-        history = memory.get_history(req.session_id, req.user_id)
+        history = memory.get_history(req.session_id, user.username)
+
+        # 注入用户画像 (语义记忆)
+        from app.memory.semantic import inject_facts_to_prompt
+        user_profile = inject_facts_to_prompt(user.username)
+        from langchain_core.messages import SystemMessage as LCMessage
 
         # 构建对话历史消息 (长对话自动压缩)
         msgs: list = []
         if history and len(history) > COMPRESS_AFTER:
             # 长对话: 注入摘要作为 system 消息
             compressed = _compress_history(history)
-            from langchain_core.messages import SystemMessage as LCMessage
-            msgs.append(LCMessage(content=f"对话历史摘要: {compressed}"))
+            system_text = f"对话历史摘要: {compressed}"
+            if user_profile:
+                system_text = user_profile + "\n\n" + system_text
+            msgs.append(LCMessage(content=system_text))
             # 只带最近 4 条原始消息
             for m in history[-4:]:
                 if m.role == "user":
@@ -272,21 +283,25 @@ async def chat_stream(req: ChatRequest):
                     from langchain_core.messages import AIMessage
                     msgs.append(AIMessage(content=m.content))
         elif history:
+            if user_profile:
+                msgs.append(LCMessage(content=user_profile))
             for m in history[-MAX_HISTORY_MESSAGES:]:
                 if m.role == "user":
                     msgs.append(HumanMessage(content=m.content))
                 elif m.role == "assistant":
                     from langchain_core.messages import AIMessage
                     msgs.append(AIMessage(content=m.content))
+        elif user_profile:
+            msgs.append(LCMessage(content=user_profile))
         msgs.append(HumanMessage(content=req.message))
 
         from app.api.analytics import track_event
-        track_event("chat_start", req.user_id, req.session_id)
+        track_event("chat_start", user.username, req.session_id)
 
         full_answer = ""
         try:
             app = get_agent_app()
-            thread_id = f"{req.user_id}:{req.session_id}"
+            thread_id = f"{user.username}:{req.session_id}"
             config = {"configurable": {"thread_id": thread_id}}
 
             initial: AgentState = {
@@ -342,11 +357,20 @@ async def chat_stream(req: ChatRequest):
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
 
         from app.api.analytics import track_event
-        track_event("chat_end", req.user_id, req.session_id, {"has_answer": bool(full_answer)})
+        track_event("chat_end", user.username, req.session_id, {"has_answer": bool(full_answer)})
 
-        await memory.add_message(req.session_id, req.user_id, "user", req.message)
+        await memory.add_message(req.session_id, user.username, "user", req.message)
         if full_answer:
-            await memory.add_message(req.session_id, req.user_id, "assistant", full_answer)
+            await memory.add_message(req.session_id, user.username, "assistant", full_answer)
+
+        # 异步触发记忆钩子 (摘要 + 事实提取, 不阻塞响应)
+        try:
+            history = memory.get_history(req.session_id, user.username)
+            if history and len(history) >= 4:
+                import asyncio as _asyncio
+                _asyncio.create_task(_memory_hooks(req.session_id, user.username, history))
+        except Exception:
+            pass
 
     return StreamingResponse(
         event_generator(),
@@ -355,12 +379,61 @@ async def chat_stream(req: ChatRequest):
     )
 
 
+# ====== 会话管理 API ======
+
+
+@router.post("/sessions", tags=["会话"])
+async def create_session(
+    user: UserInfo = Depends(require_user),
+    name: str = Query(default="新对话", description="会话名称"),
+):
+    """创建新会话。返回 session_id。"""
+    from app.memory.session import create_session as create_sess
+    session = create_sess(user.username, name)
+    return {"session": session}
+
+
+@router.get("/sessions", tags=["会话"])
+async def list_sessions(user: UserInfo = Depends(require_user)):
+    """列出当前用户的所有会话（按更新时间倒序）"""
+    from app.memory.session import list_sessions as list_sess
+    sessions = list_sess(user.username)
+    return {"sessions": sessions, "total": len(sessions)}
+
+
+@router.delete("/sessions/{session_id}", tags=["会话"])
+async def delete_session(
+    session_id: str,
+    user: UserInfo = Depends(require_user),
+):
+    """删除会话及其所有消息。需为会话所有者。"""
+    from app.memory.session import delete_session as delete_sess
+    ok = delete_sess(session_id, user.username)
+    if not ok:
+        raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+    return {"status": "ok", "message": f"会话 {session_id} 已删除"}
+
+
+@router.patch("/sessions/{session_id}", tags=["会话"])
+async def rename_session(
+    session_id: str,
+    user: UserInfo = Depends(require_user),
+    name: str = Query(..., description="新名称"),
+):
+    """重命名会话。需为会话所有者。"""
+    from app.memory.session import rename_session as rename_sess
+    ok = rename_sess(session_id, user.username, name)
+    if not ok:
+        raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+    return {"status": "ok", "session_id": session_id, "name": name}
+
+
 # ====== 会话历史管理 ======
 
 
 @router.get("/chat/history", tags=["对话"])
-async def list_conversations():
-    """列出当前用户的所有会话历史 (从 MySQL + 内存)"""
+async def list_conversations(user: UserInfo = Depends(require_user)):
+    """列出当前用户的所有会话历史 (从 MySQL + Redis，自动按 user 隔离)"""
     from app.models.database import get_session as get_db, ConversationRecord
     from sqlalchemy import func, desc
 
@@ -368,7 +441,7 @@ async def list_conversations():
     db = get_db()
     if db:
         try:
-            # MySQL: 按 session_id 分组，取最新消息
+            # MySQL: 按 session_id 分组，只查当前用户的
             rows = (
                 db.query(
                     ConversationRecord.session_id,
@@ -378,6 +451,7 @@ async def list_conversations():
                     func.count().label("messages"),
                     func.substr(func.group_concat(ConversationRecord.content), 1, 100).label("preview"),
                 )
+                .filter(ConversationRecord.user_id == user.username)
                 .group_by(ConversationRecord.session_id, ConversationRecord.user_id)
                 .order_by(desc("updated"))
                 .limit(50)
@@ -397,15 +471,12 @@ async def list_conversations():
         finally:
             db.close()
 
-    # 补充内存中的数据 (Redis + 本地)
-    memory = await get_memory_store()
-    # MemoryStore 不直接支持列出全部 key，这里从 Redis 读取
+    # 补充 Redis 中的数据 (仅当前用户)
+    seen = {s["session_id"] for s in sessions}
     try:
         import redis
         r = redis.from_url(settings.REDIS_URL, socket_connect_timeout=1, decode_responses=True)
-        keys = r.keys("chat:*")
-        seen = {s["session_id"] for s in sessions}
-        for key in keys:
+        for key in r.scan_iter(f"chat:{user.username}:*"):
             parts = key.replace("chat:", "").split(":", 1)
             if len(parts) == 2:
                 uid, sid = parts
@@ -432,8 +503,8 @@ async def list_conversations():
 
 
 @router.get("/chat/history/{session_id}", tags=["对话"])
-async def get_conversation(session_id: str):
-    """获取指定会话的完整消息历史"""
+async def get_conversation(session_id: str, user: UserInfo = Depends(require_user)):
+    """获取指定会话的完整消息历史。需为会话所有者。"""
     from app.models.database import get_session as get_db, ConversationRecord
 
     messages = []
@@ -443,7 +514,10 @@ async def get_conversation(session_id: str):
             from sqlalchemy import asc
             rows = (
                 db.query(ConversationRecord)
-                .filter(ConversationRecord.session_id == session_id)
+                .filter(
+                    ConversationRecord.session_id == session_id,
+                    ConversationRecord.user_id == user.username,
+                )
                 .order_by(asc(ConversationRecord.created_at))
                 .all()
             )
@@ -460,26 +534,36 @@ async def get_conversation(session_id: str):
 
     # 补充 Redis/内存
     memory = await get_memory_store()
-    local = memory.get_history(session_id, "anonymous")
+    local = memory.get_history(session_id, user.username)
     if not messages and local:
         messages = [{"role": m.role, "content": m.content, "time": m.timestamp.isoformat()} for m in local]
+
+    # 如果 MySQL 和 Redis 都没数据，检查是否有其他用户的 session → 403
+    if not messages:
+        from app.memory.session import get_session_owner
+        owner = get_session_owner(session_id)
+        if owner and owner != user.username:
+            raise HTTPException(status_code=403, detail="无权访问该会话")
 
     return {"session_id": session_id, "messages": messages, "total": len(messages)}
 
 
 @router.delete("/chat/history/{session_id}", tags=["对话"])
-async def delete_conversation(session_id: str):
-    """删除指定会话"""
+async def delete_conversation(session_id: str, user: UserInfo = Depends(require_user)):
+    """删除指定会话。需为会话所有者。"""
     from app.models.database import get_session as get_db, ConversationRecord
 
-    # MySQL
+    # MySQL (加 user_id 过滤)
+    deleted = False
     db = get_db()
     if db:
         try:
-            db.query(ConversationRecord).filter(
-                ConversationRecord.session_id == session_id
+            result = db.query(ConversationRecord).filter(
+                ConversationRecord.session_id == session_id,
+                ConversationRecord.user_id == user.username,
             ).delete()
             db.commit()
+            deleted = result > 0
         except Exception as e:
             logger.warning(f"MySQL 删除失败: {e}")
         finally:
@@ -487,7 +571,16 @@ async def delete_conversation(session_id: str):
 
     # Redis + 内存
     memory = await get_memory_store()
-    await memory.clear(session_id, "anonymous")
+    await memory.clear(session_id, user.username)
+
+    if not deleted:
+        # 可能只有 Redis 数据
+        from app.memory.session import get_session_owner
+        owner = get_session_owner(session_id)
+        if owner and owner != user.username:
+            raise HTTPException(status_code=403, detail="无权删除该会话")
+        if not owner:
+            raise HTTPException(status_code=404, detail="会话不存在")
 
     return {"status": "ok", "message": f"会话 {session_id} 已删除"}
 
@@ -496,14 +589,20 @@ async def delete_conversation(session_id: str):
 
 
 @router.get("/chat/approvals", tags=["对话"])
-async def list_approvals():
-    """列出所有等待审批的操作"""
+async def list_approvals(user: UserInfo = Depends(require_user)):
+    """列出当前用户的所有等待审批的操作"""
     from app.agent.human_loop import list_all_pending
-    return {"pending": list_all_pending()}
+    all_pending = list_all_pending()
+    # 过滤出当前用户的审批
+    user_pending = [
+        p for p in all_pending
+        if p.get("thread_id", "").startswith(f"{user.username}:")
+    ]
+    return {"pending": user_pending}
 
 
 @router.get("/chat/approvals/{thread_id}", tags=["对话"])
-async def check_approval(thread_id: str):
+async def check_approval(thread_id: str, user: UserInfo = Depends(require_user)):
     """检查是否有待审批操作"""
     from app.agent.human_loop import get_pending
     pending = get_pending(thread_id)
@@ -513,7 +612,7 @@ async def check_approval(thread_id: str):
 
 
 @router.post("/chat/approvals/{thread_id}/approve", tags=["对话"])
-async def approve_action(thread_id: str):
+async def approve_action(thread_id: str, user: UserInfo = Depends(require_user)):
     """批准操作"""
     from app.agent.human_loop import approve
     ok = approve(thread_id)
@@ -523,7 +622,7 @@ async def approve_action(thread_id: str):
 
 
 @router.post("/chat/approvals/{thread_id}/reject", tags=["对话"])
-async def reject_action(thread_id: str, reason: str = ""):
+async def reject_action(thread_id: str, user: UserInfo = Depends(require_user), reason: str = ""):
     """拒绝操作"""
     from app.agent.human_loop import reject
     ok = reject(thread_id, reason)
@@ -541,6 +640,7 @@ from fastapi import UploadFile, File, Form
 async def analyze_chat_image(
     file: UploadFile = File(...),
     question: str = Form(default="请描述这张图片的内容"),
+    user: UserInfo = Depends(require_user),
 ):
     """
     上传图片进行分析（截图提问、图表分析、OCR文字提取）
@@ -597,6 +697,7 @@ async def analyze_chat_image(
 async def generate_and_download_report(
     file_path: str = Query(..., description="数据文件路径"),
     session_id: str = Query(default="default"),
+    user: UserInfo = Depends(require_user),
 ):
     """
     生成 Word 数据分析报告并返回下载。
@@ -633,3 +734,79 @@ async def generate_and_download_report(
         filename=filename,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ====== 记忆 API (情景 + 语义) ======
+
+from pydantic import BaseModel as PydanticModel
+
+
+class FactSearchRequest(PydanticModel):
+    query: str = ""
+    category: str = ""
+
+
+@router.get("/memory/facts", tags=["记忆"])
+async def get_facts(
+    user: UserInfo = Depends(require_user),
+    category: str = Query(default=""),
+):
+    """获取当前用户的记忆事实。可按 category 过滤 (preference/fact/context)。"""
+    from app.memory.semantic import get_user_facts
+    facts = get_user_facts(user.username, category=category or None)
+    return {"facts": facts, "total": len(facts)}
+
+
+@router.post("/memory/facts/search", tags=["记忆"])
+async def search_facts(req: FactSearchRequest, user: UserInfo = Depends(require_user)):
+    """搜索用户记忆事实（当前为 MySQL LIKE 匹配，后续可扩展到 pgvector 语义搜索）。"""
+    from app.memory.semantic import get_user_facts
+    all_facts = get_user_facts(user.username, category=req.category or None)
+    if req.query:
+        q = req.query.lower()
+        all_facts = [f for f in all_facts if q in f["fact"].lower()]
+    return {"facts": all_facts, "total": len(all_facts)}
+
+
+@router.get("/memory/summary/{session_id}", tags=["记忆"])
+async def get_session_summary(
+    session_id: str,
+    user: UserInfo = Depends(require_user),
+):
+    """获取指定会话的结构化摘要。"""
+    from app.memory.summarizer import get_summary
+    summary = get_summary(session_id, user.username)
+    if summary:
+        return {"summary": summary}
+    return {"summary": None}
+
+
+# ====== 记忆触发钩子 (内部，非端点) ======
+
+async def _memory_hooks(session_id: str, user_id: str, messages: list, is_session_end: bool = False):
+    """在每次对话交换后调用：触发摘要 + 事实提取"""
+    import asyncio
+
+    turn_count = len([m for m in messages if m.role == "user"])
+    if not hasattr(messages[0], "role"):
+        return  # 不是 ConversationMessage 列表
+
+    # 摘要触发
+    try:
+        from app.memory.summarizer import should_summarize, generate_summary, generate_final_summary, get_summary
+        existing = get_summary(session_id, user_id)
+        prev_turns = existing.get("turn_count", 0) if existing else 0
+
+        if is_session_end and turn_count > 4:
+            await asyncio.to_thread(generate_final_summary, session_id, user_id, messages)
+        elif should_summarize(turn_count) and turn_count > prev_turns:
+            await asyncio.to_thread(generate_summary, session_id, user_id, messages)
+    except Exception as e:
+        logger.debug(f"摘要钩子跳过: {e}")
+
+    # 事实提取
+    try:
+        from app.memory.semantic import extract_facts
+        await asyncio.to_thread(extract_facts, user_id, messages)
+    except Exception as e:
+        logger.debug(f"事实提取钩子跳过: {e}")

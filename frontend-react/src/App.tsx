@@ -27,9 +27,22 @@ function AuthInit() {
   return null;
 }
 
-/** 路由守卫: 未登录重定向到 /login */
+/** 路由守卫: 初始化中显示 loading，未登录重定向到 /login */
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isLoggedIn = useAuthStore((s) => s.isLoggedIn);
+  const isRestoring = useAuthStore((s) => s.isRestoring);
+
+  if (isRestoring) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-3 text-muted-foreground">
+          <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+          <p className="text-sm">加载中...</p>
+        </div>
+      </div>
+    );
+  }
+
   if (!isLoggedIn) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }

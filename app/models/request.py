@@ -7,7 +7,10 @@ class ChatRequest(BaseModel):
     """POST /api/chat 请求体"""
     message: str = Field(..., description="用户消息", min_length=1, max_length=10000)
     session_id: str = Field(default="default", description="会话 ID")
-    user_id: str = Field(default="anonymous", description="用户 ID")
+    user_id: str = Field(
+        default="",
+        description="[DEPRECATED] 用户 ID 现在从 Bearer token 推导，此字段被忽略。保留以兼容旧客户端。"
+    )
     with_chart: bool = Field(default=True, description="是否生成图表（数据对话专用）")
 
 

@@ -9,6 +9,7 @@
 import logging
 import secrets
 from typing import Optional
+from sqlalchemy import text as sa_text
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ def _ensure_sso_table(session) -> bool:
         from sqlalchemy import Column, String, TIMESTAMP, func
 
         # 懒检查：直接用 raw SQL 创建（避免 ORM 定义冲突）
-        session.execute("""
+        session.execute(sa_text("""
             CREATE TABLE IF NOT EXISTS sso_user_map (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
                 external_key VARCHAR(256) NOT NULL UNIQUE,
@@ -57,7 +58,7 @@ def _ensure_sso_table(session) -> bool:
                 INDEX idx_local_username (local_username),
                 INDEX idx_provider_external (provider, external_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-        """)
+        """))
         session.commit()
         _sso_table_checked = True
         return True
@@ -95,7 +96,7 @@ def get_or_create_sso_user(
         try:
             _ensure_sso_table(session)
             row = session.execute(
-                "SELECT local_username, display_name FROM sso_user_map WHERE external_key = :key",
+                sa_text("SELECT local_username, display_name FROM sso_user_map WHERE external_key = :key"),
                 {"key": external_key},
             ).fetchone()
 
@@ -103,7 +104,7 @@ def get_or_create_sso_user(
                 local_username = row[0]
                 # 更新最后登录时间
                 session.execute(
-                    "UPDATE sso_user_map SET last_login_at = NOW() WHERE external_key = :key",
+                    sa_text("UPDATE sso_user_map SET last_login_at = NOW() WHERE external_key = :key"),
                     {"key": external_key},
                 )
                 session.commit()
@@ -111,9 +112,11 @@ def get_or_create_sso_user(
                 # 创建新用户
                 local_username = _generate_local_username(display_name, external_id, provider)
                 session.execute(
-                    """INSERT INTO sso_user_map
-                       (external_key, provider, external_id, local_username, display_name, email, department)
-                       VALUES (:key, :provider, :eid, :lun, :dn, :email, :dept)""",
+                    sa_text(
+                        """INSERT INTO sso_user_map
+                           (external_key, provider, external_id, local_username, display_name, email, department)
+                           VALUES (:key, :provider, :eid, :lun, :dn, :email, :dept)"""
+                    ),
                     {
                         "key": external_key,
                         "provider": provider,
@@ -160,14 +163,17 @@ def get_or_create_sso_user(
         _users[local_username]["department"] = department
 
     # === 4. 签发 JWT token ===
-    token = secrets.token_hex(32)
-    _tokens[token] = local_username
+    from app.models.user import _make_jwt, _make_refresh_token
+    role = _users[local_username].get("role", "user")
+    access_token = _make_jwt(local_username, role)
+    refresh_token = _make_refresh_token(local_username)
 
     return {
         "username": local_username,
         "display_name": _users[local_username]["display_name"],
-        "role": _users[local_username].get("role", "user"),
-        "token": token,
+        "role": role,
+        "access_token": access_token,
+        "refresh_token": refresh_token,
     }
 
 

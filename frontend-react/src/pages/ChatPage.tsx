@@ -13,14 +13,18 @@ export default function ChatPage() {
   const {
     messages,
     isStreaming,
+    activeSessionId,
     addMessage,
     updateLastAssistant,
     setStreaming,
     clearMessages,
+    createSession,
+    switchSession,
+    ensureSession,
   } = useChatStore();
 
   const { user } = useAuthStore();
-  const userId = user?.username || "anonymous";
+  const username = user?.username || "anonymous";
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [showRating, setShowRating] = useState(false);
@@ -28,26 +32,31 @@ export default function ChatPage() {
   const [dataFilePath, setDataFilePath] = useState("");
   const [dataFileName, setDataFileName] = useState("");
 
+  // 确保有活跃会话 (首次加载或会话被删后自动创建)
+  useEffect(() => {
+    ensureSession();
+  }, []);
+
   // 轮询人类审批 (10s间隔，已有弹窗时跳过)
   useEffect(() => {
     if (approval) return;  // 已有审批弹窗，停止轮询
     let mounted = true;
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/chat/approvals/${userId}`);
+        const res = await fetch(`/api/chat/approvals/${username}`);
         const data = await res.json();
         if (mounted && data.pending) setApproval(data.approval);
       } catch { /* ignore */ }
-    }, 10_000);  // 10s (之前3s太频繁)
+    }, 10_000);
     return () => { mounted = false; clearInterval(interval); };
-  }, [userId, approval]);
+  }, [username, approval]);
 
   const handleRate = async (score: number) => {
     try {
       await fetch("/api/chat/rate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: userId, score }),
+        body: JSON.stringify({ session_id: activeSessionId, score }),
       });
     } catch { /* ignore */ }
     setShowRating(false);
@@ -84,7 +93,7 @@ export default function ChatPage() {
       setStreaming(true);
 
       const ctrl = streamChat(
-        { message: sendText, user_id: userId, with_chart: true },
+        { message: sendText, session_id: activeSessionId, with_chart: true },
         (chunk) => updateLastAssistant(chunk),
         () => {
           setStreaming(false);
@@ -133,7 +142,7 @@ export default function ChatPage() {
       );
       abortRef.current = ctrl;
     },
-    [addMessage, setStreaming, updateLastAssistant, dataFilePath, dataFileName]
+    [addMessage, setStreaming, updateLastAssistant, activeSessionId, dataFilePath, dataFileName]
   );
 
   const handleStop = () => {
@@ -165,11 +174,11 @@ export default function ChatPage() {
           )}
         </div>
         <button
-          onClick={clearMessages}
+          onClick={async () => { await createSession(); }}
           className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:bg-accent transition-colors"
         >
           <Trash2 className="w-3.5 h-3.5" />
-          清空对话
+          新建对话
         </button>
       </header>
 
