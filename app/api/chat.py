@@ -106,8 +106,9 @@ async def chat(req: ChatRequest, user: UserInfo = Depends(require_user)):
 
         if task_type == "complex":
             try:
+                import asyncio as _asyncio
                 from app.agent.multi_agent import run_multi_agent
-                multi_result = run_multi_agent(full_input)
+                multi_result = await _asyncio.to_thread(run_multi_agent, full_input)
                 answer = multi_result["answer"]
                 agents_used = multi_result.get("agents_used", [])
             except Exception as e:
@@ -426,6 +427,20 @@ async def rename_session(
     if not ok:
         raise HTTPException(status_code=404, detail="会话不存在或无权访问")
     return {"status": "ok", "session_id": session_id, "name": name}
+
+
+@router.patch("/sessions/{session_id}/archive", tags=["会话"])
+async def toggle_archive_session(
+    session_id: str,
+    user: UserInfo = Depends(require_user),
+    archived: bool = Query(default=True, description="true=归档, false=取消归档"),
+):
+    """归档/取消归档会话。需为会话所有者。"""
+    from app.memory.session import archive_session
+    ok = archive_session(session_id, user.username, archived)
+    if not ok:
+        raise HTTPException(status_code=404, detail="会话不存在或无权访问")
+    return {"status": "ok", "session_id": session_id, "is_archived": archived}
 
 
 # ====== 会话历史管理 ======

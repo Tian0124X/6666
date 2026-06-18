@@ -2,7 +2,6 @@ import { useEffect, useRef, useCallback, useState } from "react";
 import { ChatBubble } from "../components/ChatBubble";
 import { ChatInput } from "../components/ChatInput";
 import { useChatStore } from "../stores/chatStore";
-import { useAuthStore } from "../stores/authStore";
 import type { ChatMessage } from "../stores/chatStore";
 import { streamChat } from "../lib/api";
 import { Sparkles, Trash2 } from "lucide-react";
@@ -23,8 +22,6 @@ export default function ChatPage() {
     ensureSession,
   } = useChatStore();
 
-  const { user } = useAuthStore();
-  const username = user?.username || "anonymous";
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [showRating, setShowRating] = useState(false);
@@ -35,7 +32,7 @@ export default function ChatPage() {
   // 确保有活跃会话 (首次加载或会话被删后自动创建)
   useEffect(() => {
     ensureSession();
-  }, []);
+  }, [ensureSession]);
 
   // 轮询人类审批 (10s间隔，已有弹窗时跳过)
   useEffect(() => {
@@ -43,13 +40,14 @@ export default function ChatPage() {
     let mounted = true;
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`/api/chat/approvals/${username}`);
+        const { authHeader } = await import("../stores/authStore");
+        const res = await fetch("/api/chat/approvals", { headers: { ...authHeader() } });
         const data = await res.json();
         if (mounted && data.pending) setApproval(data.approval);
       } catch { /* ignore */ }
     }, 10_000);
     return () => { mounted = false; clearInterval(interval); };
-  }, [username, approval]);
+  }, [approval]);
 
   const handleRate = async (score: number) => {
     try {
@@ -96,7 +94,6 @@ export default function ChatPage() {
         { message: sendText, session_id: activeSessionId, with_chart: true },
         (chunk) => updateLastAssistant(chunk),
         () => {
-          setStreaming(false);
           setShowRating(true);
           useChatStore.setState((s) => {
             const msgs = [...s.messages];
@@ -110,8 +107,16 @@ export default function ChatPage() {
           });
         },
         (err) => {
-          setStreaming(false);
-          updateLastAssistant(`\n\n❌ 错误: ${err}`);
+          useChatStore.setState((s) => {
+            const msgs = [...s.messages];
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i].role === "assistant" && msgs[i].isStreaming) {
+                msgs[i] = { ...msgs[i], isStreaming: false, content: msgs[i].content + `\n\n❌ 错误: ${err}` };
+                break;
+              }
+            }
+            return { messages: msgs, isStreaming: false };
+          });
         },
         (data) => {
           // 接收结构化数据 — 表格和图表可以同时存在

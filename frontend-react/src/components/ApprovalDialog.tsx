@@ -1,5 +1,6 @@
 import { ShieldAlert, Check, X, Loader2 } from "lucide-react";
 import { useState } from "react";
+import { authHeader } from "../stores/authStore";
 
 interface ApprovalData {
   thread_id: string;
@@ -29,7 +30,10 @@ export function ApprovalDialog({ approval, onApprove, onReject }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/chat/approvals/${approval.thread_id}/${action}`, { method: "POST" });
+      const res = await fetch(`/api/chat/approvals/${approval.thread_id}/${action}`, {
+        method: "POST",
+        headers: { ...authHeader() },
+      });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
         throw new Error(err.detail || `操作失败 (${res.status})`);

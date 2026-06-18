@@ -66,7 +66,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
     const data = await res.json();
     saveAuth(data.access_token, data.refresh_token || "", data.user);
-    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true });
+    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true, isRestoring: false });
   },
 
   loginLdap: async (username, password) => {
@@ -81,7 +81,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
     const data = await res.json();
     saveAuth(data.access_token, data.refresh_token || "", data.user);
-    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true });
+    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true, isRestoring: false });
   },
 
   loginOidc: async () => {
@@ -107,7 +107,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
     const data = await res.json();
     saveAuth(data.access_token, data.refresh_token || "", data.user);
-    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true });
+    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true, isRestoring: false });
   },
 
   register: async (username, password, displayName) => {
@@ -122,12 +122,13 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
     const data = await res.json();
     saveAuth(data.access_token, data.refresh_token || "", data.user);
-    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true });
+    set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true, isRestoring: false });
   },
 
   logout: () => {
+    const headers = authHeader();  // 先读 token 再清存储
     clearAuth();
-    fetch(`${API}/logout`, { method: "POST", headers: authHeader() }).catch(() => {});
+    fetch(`${API}/logout`, { method: "POST", headers }).catch(() => {});
     set({ token: null, refreshToken: null, user: null, isLoggedIn: false });
   },
 
@@ -159,7 +160,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       if (!res.ok) return false;
       const data = await res.json();
       saveAuth(data.access_token, data.refresh_token || "", data.user);
-      set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true });
+      set({ token: data.access_token, refreshToken: data.refresh_token || "", user: data.user, isLoggedIn: true, isRestoring: false });
       return true;
     } catch {
       return false;

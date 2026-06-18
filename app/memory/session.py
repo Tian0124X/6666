@@ -113,6 +113,7 @@ def create_session(user_id: str, name: str = "新对话") -> dict:
         "updated_at": now.isoformat(),
         "message_count": 0,
         "preview": "",
+        "is_archived": 0,
     }
 
     # Redis
@@ -173,8 +174,8 @@ def list_sessions(user_id: str) -> list[dict]:
             try:
                 rows = sess.execute(
                     sa_text(
-                        """SELECT session_id, user_id, name, created_at, updated_at
-                           FROM sessions WHERE user_id = :uid AND is_archived = 0
+                        """SELECT session_id, user_id, name, created_at, updated_at, is_archived
+                           FROM sessions WHERE user_id = :uid
                            ORDER BY updated_at DESC LIMIT 100"""
                     ),
                     {"uid": user_id},
@@ -189,6 +190,8 @@ def list_sessions(user_id: str) -> list[dict]:
                             "created_at": row[3].isoformat() if row[3] else "",
                             "updated_at": row[4].isoformat() if row[4] else "",
                             "message_count": 0,
+                            "preview": "",
+                            "is_archived": row[5] if len(row) > 5 else 0,
                         }
             except Exception as e:
                 logger.warning(f"MySQL 读 session 列表失败: {e}")
@@ -257,13 +260,16 @@ def delete_session(session_id: str, user_id: str) -> bool:
             store = await get_memory_store()
             await store.clear(session_id, user_id)
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.create_task(_clear())
-            else:
-                loop.run_until_complete(_clear())
+            loop = asyncio.get_running_loop()
+            asyncio.create_task(_clear())
         except RuntimeError:
-            pass
+            # 没有运行中的 event loop，直接同步清理内存 dict
+            try:
+                from app.memory.store import _memory_store_instance
+                if _memory_store_instance:
+                    _memory_store_instance._store.pop(f"chat:{user_id}:{session_id}", None)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -307,6 +313,45 @@ def rename_session(session_id: str, user_id: str, new_name: str) -> bool:
                 sess.commit()
         except Exception as e:
             logger.warning(f"MySQL 改 session 名失败: {e}")
+        finally:
+            sess.close()
+
+    return owned
+
+
+def archive_session(session_id: str, user_id: str, archived: bool = True) -> bool:
+    """归档/取消归档会话"""
+    redis = _redis_client()
+    owned = False
+
+    if redis:
+        try:
+            raw = redis.hget(f"sessions:{user_id}", session_id)
+            if raw:
+                owned = True
+                data = json.loads(raw)
+                data["is_archived"] = 1 if archived else 0
+                data["updated_at"] = datetime.now().isoformat()
+                redis.hset(f"sessions:{user_id}", session_id, json.dumps(data, ensure_ascii=False))
+        except Exception:
+            pass
+
+    sess = _mysql_session()
+    if sess:
+        try:
+            row = sess.execute(
+                sa_text("SELECT session_id FROM sessions WHERE session_id = :sid AND user_id = :uid"),
+                {"sid": session_id, "uid": user_id},
+            ).fetchone()
+            if row:
+                owned = True
+                sess.execute(
+                    sa_text("UPDATE sessions SET is_archived = :a, updated_at = NOW() WHERE session_id = :sid AND user_id = :uid"),
+                    {"a": 1 if archived else 0, "sid": session_id, "uid": user_id},
+                )
+                sess.commit()
+        except Exception as e:
+            logger.warning(f"MySQL 归档 session 失败: {e}")
         finally:
             sess.close()
 

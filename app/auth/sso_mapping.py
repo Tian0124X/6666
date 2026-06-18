@@ -148,7 +148,7 @@ def get_or_create_sso_user(
             }
 
     # === 3. 确保本地用户存在 ===
-    from app.models.user import _users, _tokens
+    from app.models.user import _users
 
     if local_username not in _users:
         from app.models.user import create_user

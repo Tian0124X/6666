@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useChatStore, type SessionSummary } from "../stores/chatStore";
+import { authHeader } from "../stores/authStore";
 import {
   MessageSquare, Search, Trash2, Clock, RefreshCw,
   ChevronRight, Loader2, ChevronDown,
@@ -42,7 +43,8 @@ export default function HistoryPage() {
     setLoadingMsgs(true);
     setExpanded(new Set());
     try {
-      const res = await fetch(`/api/chat/history/${sid}`);
+      const res = await fetch(`/api/chat/history/${sid}`, { headers: { ...authHeader() } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setMessages(data.messages || []);
     } catch {
@@ -247,8 +249,8 @@ export default function HistoryPage() {
                       第 {idx + 1} 轮
                     </span>
                     <span className="text-xs text-[var(--color-muted-foreground)] truncate max-w-[400px]">
-                      {turn.user.content.slice(0, 80)}
-                      {turn.user.content.length > 80 ? "…" : ""}
+                      {(turn.user.content || "").slice(0, 80)}
+                      {(turn.user.content || "").length > 80 ? "…" : ""}
                     </span>
                   </button>
 

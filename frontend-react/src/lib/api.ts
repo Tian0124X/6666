@@ -56,6 +56,7 @@ export function streamChat(
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let hadError = false;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -67,9 +68,8 @@ export function streamChat(
           try {
             const data = JSON.parse(line.slice(6));
             if (data.content) onChunk(data.content);
-            if (data.done) onDone();
-            if (data.error) onError(data.error);
-            // 富文本数据: 表格/图表/代码
+            if (data.error) { hadError = true; onError(data.error); }
+            // 富文本数据
             if (data.type === "data_result" && onData) {
               onData({
                 code: data.code,
@@ -78,24 +78,24 @@ export function streamChat(
                 scalar: data.scalar,
               });
             }
+            if (data.done && !hadError) onDone();
           } catch { /* skip malformed JSON */ }
         }
       }
     }
-    // 处理 stream 结束后 buffer 中残留的数据
+    // 处理残留 buffer
     if (buffer.startsWith("data: ")) {
       try {
         const data = JSON.parse(buffer.slice(6));
         if (data.content) onChunk(data.content);
-        if (data.done) onDone();
-        if (data.error) onError(data.error);
+        if (data.error) { hadError = true; onError(data.error); }
         if (data.type === "data_result" && onData) {
           onData({ code: data.code, table: data.table, chart: data.chart, scalar: data.scalar });
         }
+        if (data.done && !hadError) onDone();
       } catch { /* skip */ }
     }
-    // 确保 onDone 始终被调用
-    onDone();
+    if (!hadError) onDone();
   }).catch((e) => {
     if (e.name !== "AbortError") onError(e.message);
   });
@@ -121,6 +121,7 @@ export const sessionsApi = {
   },
   delete: (sessionId: string) => request<{ status: string }>(`/sessions/${sessionId}`, { method: "DELETE" }),
   rename: (sessionId: string, name: string) => request<{ status: string }>(`/sessions/${sessionId}?name=${encodeURIComponent(name)}`, { method: "PATCH" }),
+  archive: (sessionId: string, archived = true) => request<{ status: string }>(`/sessions/${sessionId}/archive?archived=${archived}`, { method: "PATCH" }),
 };
 
 // === Tools API ===
@@ -156,7 +157,11 @@ export const knowledgeApi = {
   upload: async (file: File) => {
     const fd = new FormData();
     fd.append("file", file);
-    const res = await fetch(`${BASE}/knowledge/upload`, { method: "POST", body: fd });
+    const res = await fetch(`${BASE}/knowledge/upload`, {
+      method: "POST",
+      headers: { ...authHeader() },
+      body: fd,
+    });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail || `HTTP ${res.status}`);

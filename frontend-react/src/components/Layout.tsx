@@ -21,6 +21,8 @@ import {
   Trash2,
   MoreHorizontal,
   Pencil,
+  Archive,
+  ArchiveRestore,
 } from "lucide-react";
 
 const nav = [
@@ -46,19 +48,25 @@ function SessionSidebar() {
     switchSession,
     deleteSession,
     renameSession,
+    archiveSession,
   } = useChatStore();
 
   const [showMenu, setShowMenu] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
 
   useEffect(() => {
     if (isLoggedIn && user && !sessionsLoaded) {
       loadSessions();
     }
-  }, [isLoggedIn, user]);
+  }, [isLoggedIn, user, sessionsLoaded, loadSessions]);
 
   if (!isLoggedIn || !user) return null;
+
+  const activeSessions = sessions.filter((s) => !s.is_archived);
+  const archivedSessions = sessions.filter((s) => s.is_archived);
+  const displaySessions = showArchived ? archivedSessions : activeSessions;
 
   const handleNewSession = async () => {
     const sid = await createSession();
@@ -72,7 +80,18 @@ function SessionSidebar() {
 
   const handleDelete = async (sid: string) => {
     setShowMenu(null);
+    if (!confirm("确定删除此会话及所有消息？此操作不可撤销。")) return;
     await deleteSession(sid);
+  };
+
+  const handleArchive = async (sid: string) => {
+    setShowMenu(null);
+    await archiveSession(sid, true);
+  };
+
+  const handleUnarchive = async (sid: string) => {
+    setShowMenu(null);
+    await archiveSession(sid, false);
   };
 
   const handleRenameStart = (sid: string, currentName: string) => {
@@ -106,17 +125,30 @@ function SessionSidebar() {
     <div className="flex flex-col border-t border-border pt-2 pb-1">
       <div className="flex items-center justify-between px-3 mb-1">
         <span className="text-xs font-medium text-muted-foreground">对话列表</span>
-        <button
-          onClick={handleNewSession}
-          className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-          title="新建对话"
-        >
-          <Plus className="w-3.5 h-3.5" />
-        </button>
+        <div className="flex items-center gap-0.5">
+          {archivedSessions.length > 0 && (
+            <button
+              onClick={() => setShowArchived(!showArchived)}
+              className={`p-1 rounded text-[10px] transition-colors ${
+                showArchived ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground"
+              }`}
+              title={showArchived ? "显示活跃对话" : "显示已归档"}
+            >
+              {showArchived ? "活跃" : "归档"}
+            </button>
+          )}
+          <button
+            onClick={handleNewSession}
+            className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+            title="新建对话"
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
       <div className="max-h-[40vh] overflow-y-auto px-1 space-y-0.5">
-        {sessions.map((s) => (
+        {displaySessions.map((s) => (
           <div
             key={s.session_id}
             className={`group relative flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-xs transition-colors ${
@@ -169,6 +201,21 @@ function SessionSidebar() {
                   >
                     <Pencil className="w-3 h-3" /> 重命名
                   </button>
+                  {s.is_archived ? (
+                    <button
+                      onClick={() => handleUnarchive(s.session_id)}
+                      className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-accent text-left"
+                    >
+                      <ArchiveRestore className="w-3 h-3" /> 取消归档
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => handleArchive(s.session_id)}
+                      className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-accent text-left"
+                    >
+                      <Archive className="w-3 h-3" /> 归档
+                    </button>
+                  )}
                   <button
                     onClick={() => handleDelete(s.session_id)}
                     className="flex items-center gap-2 w-full px-3 py-1.5 text-xs hover:bg-accent text-red-500 text-left"
@@ -260,9 +307,16 @@ export function Layout() {
 
 function SidebarUser() {
   const { user, isLoggedIn, logout } = useAuthStore();
+  const resetChat = useChatStore((s) => s.reset);
   const navigate = useNavigate();
 
   if (!isLoggedIn || !user) return null;
+
+  const handleLogout = () => {
+    logout();
+    resetChat();
+    navigate("/login");
+  };
 
   return (
     <div className="flex items-center justify-between px-1 py-1">
@@ -275,7 +329,7 @@ function SidebarUser() {
         </span>
       </div>
       <button
-        onClick={() => { logout(); navigate("/login"); }}
+        onClick={handleLogout}
         className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground transition-colors"
         title="退出登录"
       >

@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import { authHeader } from "../stores/authStore";
 import {
   Beaker, Play, Loader2, CheckCircle2, XCircle,
   Target, Clock, BarChart3, TrendingUp,
@@ -44,7 +45,10 @@ export default function EvalPage() {
   const runRagEval = useCallback(async () => {
     setLoading("rag");
     try {
-      const res = await fetch(`/api/eval/rag?mode=${ragMode}`, { method: "POST" });
+      const res = await fetch(`/api/eval/rag?mode=${ragMode}`, {
+        method: "POST",
+        headers: { ...authHeader() },
+      });
       setRagResult(await res.json());
     } catch { /* ignore */ }
     setLoading("");

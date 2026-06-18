@@ -4,6 +4,7 @@ Token 格式: 标准 JWT (PyJWT), 签名 HS256, 过期 24h
 存储: MySQL users 表优先 → 内存 dict 兜底
 """
 
+import os
 import secrets
 import logging
 from datetime import datetime, timedelta
@@ -33,7 +34,7 @@ _users: dict[str, dict] = {}
 _tokens: dict[str, str] = {}  # token → username (deprecated, keep for migration)
 _token_blacklist: set[str] = set()  # 登出黑名单
 
-JWT_SECRET = secrets.token_hex(32)  # 服务重启后失效 (可后续改为环境变量)
+JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_hex(32))  # 生产环境务必设置环境变量持久化
 JWT_ALGORITHM = "HS256"
 TOKEN_EXPIRE_HOURS = 24
 REFRESH_TOKEN_BYTES = 32  # refresh token 字节数

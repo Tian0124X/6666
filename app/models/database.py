@@ -1,7 +1,7 @@
 """MySQL 数据库连接 — SQLAlchemy 2.0"""
 
 import logging
-from sqlalchemy import create_engine, Column, BigInteger, String, Text, TIMESTAMP, Enum, JSON, Integer, text
+from sqlalchemy import create_engine, Column, BigInteger, String, Text, TIMESTAMP, Enum, JSON, Integer, text, Index
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.sql import func
 from app.config import settings
@@ -63,9 +63,13 @@ class ConversationSummary(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     session_id = Column(String(64), nullable=False, index=True)
     user_id = Column(String(64), nullable=False, index=True)
-    summary_json = Column(Text, nullable=False)  # JSON: {summary, key_topics, decisions, ...}
-    is_final = Column(Integer, default=0)  # 1=最终摘要
+    summary_json = Column(Text, nullable=False)
+    is_final = Column(Integer, default=0)
     created_at = Column(TIMESTAMP, server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_summary_session_user", "session_id", "user_id", unique=True),
+    )
 
 
 class UserFact(Base):

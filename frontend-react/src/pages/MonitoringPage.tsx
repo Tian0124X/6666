@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { authHeader } from "../stores/authStore";
 import {
   Activity, TrendingUp, Clock, AlertTriangle,
   Star, RefreshCw, Users, Brain, Wrench,
@@ -42,7 +43,7 @@ export default function MonitoringPage() {
     try {
       const [ov, tr, kn, pf] = await Promise.all([
         fetch("/api/analytics/overview").then((r) => r.json()),
-        fetch(`/api/analytics/trends?days=${days}`).then((r) => r.json()),
+        fetch(`/api/analytics/trends?days=${days}`, { headers: { ...authHeader() } }).then((r) => r.json()),
         fetch("/api/analytics/knowledge").then((r) => r.json()),
         fetch("/api/analytics/performance").then((r) => r.json()),
       ]);

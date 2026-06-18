@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { sessionsApi, authHeader } from "../stores/authStore";
+import { sessionsApi } from "../lib/api";
+import { authHeader } from "../stores/authStore";
 
 export interface ChartConfig {
   type: "bar" | "line" | "pie" | "scatter";
@@ -44,6 +45,7 @@ export interface SessionSummary {
   updated_at?: string;
   created_at?: string;
   preview?: string;
+  is_archived?: number;
 }
 
 interface ChatStore {
@@ -67,7 +69,11 @@ interface ChatStore {
   switchSession: (sessionId: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   renameSession: (sessionId: string, name: string) => Promise<void>;
+  archiveSession: (sessionId: string, archived?: boolean) => Promise<void>;
   ensureSession: () => Promise<string>;
+
+  // Reset
+  reset: () => void;
 
   // Internal
   _switchAbort: AbortController | null;
@@ -86,10 +92,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   addMessage: (msg) =>
     set((s) => {
       const msgs = [...s.messages.slice(-(MAX_MESSAGES - 1)), { ...msg, id: crypto.randomUUID() }];
-      // 同步更新 session 的 message_count
+      // 仅增加计数，不覆盖 (避免 switchSession 后重置)
       const sessions = s.sessions.map((ss) =>
         ss.session_id === s.activeSessionId
-          ? { ...ss, message_count: msgs.length }
+          ? { ...ss, message_count: ss.message_count + 1 }
           : ss
       );
       return { messages: msgs, sessions };
@@ -167,8 +173,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (get().activeSessionId !== sessionId) return;
       const msgs = (data.messages || []).map((m: { role: string; content: string }) => ({
         id: crypto.randomUUID(),
-        role: m.role as "user" | "assistant",
-        content: m.content,
+        role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
+        content: m.content || "",
       }));
       set({ messages: msgs });
     } catch (e: any) {
@@ -206,6 +212,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
+  archiveSession: async (sessionId, archived = true) => {
+    try {
+      await sessionsApi.archive(sessionId, archived);
+      set((s) => ({
+        sessions: s.sessions.map((ss) =>
+          ss.session_id === sessionId ? { ...ss, is_archived: archived ? 1 : 0 } : ss
+        ),
+      }));
+    } catch (e) {
+      console.warn("归档失败:", e);
+    }
+  },
+
   ensureSession: async () => {
     const { activeSessionId, sessionsLoaded, loadSessions, createSession } = get();
     if (!sessionsLoaded) await loadSessions();
@@ -220,4 +239,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
     return activeSessionId;
   },
+
+  reset: () => set({
+    messages: [],
+    sessions: [],
+    activeSessionId: "default",
+    sessionsLoaded: false,
+    isStreaming: false,
+    _switchAbort: null,
+  }),
 }));
