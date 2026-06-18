@@ -8,13 +8,23 @@
 
 import logging
 import secrets
+import time
 from typing import Optional
+from urllib.parse import urlencode
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 内存存储 state → redirect_uri 映射 (用于验证回调)
-_oidc_states: dict[str, str] = {}
+# 内存存储 state → (redirect_uri, created_at) 映射 (用于验证回调)
+_oidc_states: dict[str, tuple[str, float]] = {}
+
+
+def _cleanup_oidc_states():
+    """清理超过 10 分钟的过期 OIDC state"""
+    now = time.time()
+    expired = [k for k, v in _oidc_states.items() if now - v[1] > 600]
+    for k in expired:
+        del _oidc_states[k]
 
 
 def is_oidc_enabled() -> bool:
@@ -63,9 +73,13 @@ def oidc_get_authorization_url(redirect_uri: str = "") -> Optional[str]:
     # 生成随机 state 防 CSRF
     state = secrets.token_hex(16)
     redirect = redirect_uri or settings.OIDC_REDIRECT_URI
-    _oidc_states[state] = redirect
+    _oidc_states[state] = (redirect, time.time())
 
-    # 构建授权 URL
+    # 清理过期 state + 上限保护
+    if len(_oidc_states) > 1000:
+        _cleanup_oidc_states()
+
+    # 构建授权 URL (使用 urlencode 确保参数正确编码)
     params = {
         "response_type": "code",
         "client_id": settings.OIDC_CLIENT_ID,
@@ -74,7 +88,7 @@ def oidc_get_authorization_url(redirect_uri: str = "") -> Optional[str]:
         "state": state,
     }
 
-    query = "&".join(f"{k}={v}" for k, v in params.items())
+    query = urlencode(params)
     return f"{auth_endpoint}?{query}"
 
 
@@ -93,7 +107,7 @@ def oidc_exchange_code(code: str, state: str = "") -> Optional[dict]:
 
     # 验证 state (防 CSRF)
     if state and state in _oidc_states:
-        redirect_uri = _oidc_states.pop(state)
+        redirect_uri, _ = _oidc_states.pop(state)
     else:
         redirect_uri = settings.OIDC_REDIRECT_URI
         if state:

@@ -8,6 +8,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="用户消息", min_length=1, max_length=10000)
     session_id: str = Field(default="default", description="会话 ID")
     user_id: str = Field(default="anonymous", description="用户 ID")
+    with_chart: bool = Field(default=True, description="是否生成图表（数据对话专用）")
 
 
 class KnowledgeQARequest(BaseModel):

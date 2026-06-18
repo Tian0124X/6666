@@ -158,11 +158,19 @@ def create_agent_graph(tools: list[BaseTool] | None = None):
     workflow.add_edge("execute", "aggregate")
     workflow.add_edge("aggregate", END)
 
-    # 编译 — MemorySaver (开发) / AsyncSqliteSaver (生产)
-    # 开发环境使用 MemorySaver，支持 async stream
-    # 生产部署时替换为 AsyncSqliteSaver 持久化
-    checkpointer = MemorySaver()
-    logger.info("Checkpointer: MemorySaver (开发模式)")
+    # 编译 — 根据环境选择 checkpointer
+    import os
+    if os.getenv("APP_ENV", "development") == "production":
+        try:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            checkpointer = AsyncSqliteSaver.from_conn_string("checkpoints.db")
+            logger.info("Checkpointer: AsyncSqliteSaver (持久化)")
+        except ImportError:
+            checkpointer = MemorySaver()
+            logger.warning("AsyncSqliteSaver 不可用，回退到 MemorySaver")
+    else:
+        checkpointer = MemorySaver()
+        logger.info("Checkpointer: MemorySaver (开发模式)")
 
     app = workflow.compile(checkpointer=checkpointer)
     logger.info("LangGraph 工作流编译完成")

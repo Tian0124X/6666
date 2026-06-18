@@ -12,18 +12,24 @@ import {
 export default function AnalyticsPage() {
   const [overview, setOverview] = useState<Record<string, unknown> | null>(null);
   const [trends, setTrends] = useState<Record<string, unknown>[]>([]);
+  const [knowledgeData, setKnowledgeData] = useState<Record<string, unknown> | null>(null);
+  const [perfData, setPerfData] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState(7);
 
   const fetch = useCallback(async () => {
     setLoading(true);
     try {
-      const [ov, tr] = await Promise.all([
+      const [ov, tr, kn, pf] = await Promise.all([
         analyticsApi.overview(),
         analyticsApi.trends(days),
+        analyticsApi.knowledge().catch(() => null),
+        analyticsApi.performance().catch(() => null),
       ]);
       setOverview(ov as unknown as Record<string, unknown>);
       setTrends(tr.trends || []);
+      setKnowledgeData(kn as Record<string, unknown> | null);
+      setPerfData(pf as Record<string, unknown> | null);
     } catch { /* ignore */ }
     setLoading(false);
   }, [days]);
@@ -90,18 +96,44 @@ export default function AnalyticsPage() {
                     <Brain className="w-4 h-4" />
                     知识库使用
                   </h3>
-                  <div className="text-sm text-[var(--color-muted-foreground)]">
-                    开放 API 端点: <code className="text-xs bg-[var(--color-accent)] px-1 rounded">GET /api/analytics/knowledge</code>
-                  </div>
+                  {knowledgeData ? (
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div>
+                        <p className="text-[var(--color-muted-foreground)]">今日 RAG 查询</p>
+                        <p className="text-2xl font-bold">{(knowledgeData as any).rag_queries_today ?? "--"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[var(--color-muted-foreground)]">缓存命中率</p>
+                        <p className="text-2xl font-bold">{((knowledgeData as any).cache_hit_rate != null) ? `${Math.round((knowledgeData as any).cache_hit_rate * 100)}%` : "--"}</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-[var(--color-muted-foreground)]">暂无数据</div>
+                  )}
                 </div>
                 <div className="bg-[var(--color-card)] border border-[var(--color-border)] rounded-xl p-6">
                   <h3 className="font-medium mb-4 flex items-center gap-2">
                     <Target className="w-4 h-4" />
                     性能分布
                   </h3>
-                  <div className="text-sm text-[var(--color-muted-foreground)]">
-                    开放 API 端点: <code className="text-xs bg-[var(--color-accent)] px-1 rounded">GET /api/analytics/performance</code>
-                  </div>
+                  {perfData ? (
+                    <div className="grid grid-cols-3 gap-3 text-sm">
+                      <div>
+                        <p className="text-[var(--color-muted-foreground)]">P50</p>
+                        <p className="text-lg font-bold">{(perfData as any).p50 ?? "--"} ms</p>
+                      </div>
+                      <div>
+                        <p className="text-[var(--color-muted-foreground)]">P95</p>
+                        <p className="text-lg font-bold">{(perfData as any).p95 ?? "--"} ms</p>
+                      </div>
+                      <div>
+                        <p className="text-[var(--color-muted-foreground)]">P99</p>
+                        <p className="text-lg font-bold">{(perfData as any).p99 ?? "--"} ms</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-[var(--color-muted-foreground)]">暂无数据</div>
+                  )}
                 </div>
               </div>
             </>

@@ -9,10 +9,11 @@ import re
 import json
 import logging
 import traceback
-from typing import Optional
+from typing import Optional, Any
 from pydantic import BaseModel, Field
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
 import pandas as pd
 import numpy as np
 
@@ -49,7 +50,6 @@ FORBIDDEN_PATTERNS = [
     r'requests?\.', r'urllib', r'http', r'socket',
     r'multiprocessing', r'threading', r'signal',
     r'os\.system', r'os\.popen', r'os\.spawn',
-    # 禁止图表相关操作 (图表由前端渲染, 不需要后端生成图片)
     r'matplotlib', r'plt\.', r'base64', r'BytesIO', r'savefig',
     r'pyplot', r'figure\s*\(', r'imshow', r'imread',
 ]
@@ -61,11 +61,8 @@ def _sanitize_code(code: str) -> str:
     for pattern in FORBIDDEN_PATTERNS:
         if re.search(pattern, code_lower):
             raise ValueError(f"代码包含禁止的操作: {pattern}")
-
-    # 检查代码是否包含 __ 双下划线访问
     if re.search(r'__\w+', code) or re.search(r'\w+__', code):
         raise ValueError("代码包含禁止的双下划线访问")
-
     return code
 
 
@@ -78,7 +75,6 @@ def _execute_sandbox(code: str, df: pd.DataFrame) -> dict:
     """
     _sanitize_code(code)
 
-    # 构建受限命名空间
     namespace = {
         "__builtins__": SAFE_BUILTINS,
         "pd": pd,
@@ -87,11 +83,9 @@ def _execute_sandbox(code: str, df: pd.DataFrame) -> dict:
     }
 
     try:
-        # 捕获最后一行表达式的值
         lines = code.strip().split("\n")
         last_line = lines[-1].strip()
 
-        # 如果最后一行是表达式（不是赋值/控制流），包装它来捕获结果
         if not last_line.startswith(("if ", "for ", "while ", "def ", "class ", "try:", "except", "else:", "elif ", "with ")) and "=" not in last_line.split("(")[0]:
             exec_lines = "\n".join(lines[:-1]) if len(lines) > 1 else ""
             exec_lines += f"\n__result__ = {last_line}"
@@ -104,7 +98,6 @@ def _execute_sandbox(code: str, df: pd.DataFrame) -> dict:
         result = namespace.get("__result__", None)
 
         if isinstance(result, pd.DataFrame):
-            # 截断大结果
             if len(result) > 100:
                 result = result.head(100)
             return {
@@ -129,28 +122,74 @@ def _execute_sandbox(code: str, df: pd.DataFrame) -> dict:
         return {"type": "error", "error": f"{type(e).__name__}: {e}"}
 
 
+# ====== 结构化输出模型 ======
+
+class ChartConfig(BaseModel):
+    """图表配置 — LLM 结构化输出的图表部分"""
+    type: str = Field(default="bar", description="图表类型: bar / line / pie")
+    x: str = Field(default="", description="X轴 / 分类列名")
+    y: str = Field(default="", description="Y轴 / 数值列名")
+    title: str = Field(default="图表", description="图表标题")
+    data: list[dict[str, Any]] = Field(default_factory=list, description="图表数据，最多20条")
+
+
+class DataAnalysisOutput(BaseModel):
+    """LLM 输出 — 数据分析结果（灵活版）"""
+    content: str = Field(description="markdown 格式的自然语言回答，这是用户看到的主要内容")
+    code: str = Field(default="", description="可选的 pandas 代码，直接操作 df，最后一行是表达式")
+    chart_config: ChartConfig | None = Field(default=None, description="可选图表配置，仅当图表能增强理解时输出")
+
+
 # ====== LLM 系统提示 ======
 
-DATA_CHAT_SYSTEM = """你是一个数据分析专家。用户上传了数据文件，你需要用 pandas 代码回答他们的问题。
+DATA_CHAT_SYSTEM = """你是企业智能办公助手的数据分析模块。用户上传了数据文件，已加载为 df 变量。
 
-## 数据信息
+## 数据概况
 {df_info}
 
-## 规则
-1. 只写 pandas/numpy 代码，不要写 markdown 代码块标记
-2. 代码最后一行必须是表达式（结果会自动展示给用户）
-3. 如果需要画图，用 SPEC:CHART:{{"type":"bar","x":"列名","y":"列名","title":"标题","data":[{{...}}]}} 格式，不要在代码中生成 base64 图片
-4. **禁止**使用 matplotlib、plt、base64、BytesIO、savefig，图表由前端渲染
-5. 代码要简洁、健壮，处理可能的 NaN
-6. 用中文回答，先给文字解读，再用 SPEC:CODE: 标记代码
+## 核心原则
 
-## 输出格式
-[完整的文字解读，包含具体数字、排名、对比等，不要只说"如下"然后留空]
+### 1. 意图优先
+先判断用户的真实意图：
+- 用户只是打招呼/闲聊 → 自然回应，不要硬分析数据
+- 用户问"数据怎么样" → 给概览统计 + 关键发现
+- 用户问具体问题 → 精准回答 + 数据支撑
+- 用户说"生成报告" → 标记需要报告输出
 
-SPEC:CODE:
-你的pandas代码（最后一行是结果表达式）
+### 2. 对话自然
+像人类数据分析师一样回答——先给结论和洞察，再附细节。不要套固定模板。
 
-注意：SPEC:CODE之前的文字必须包含完整结论。比如"各分类平均单价：电子产品299元最高，办公用品45元最低"而不是"各分类平均单价如下："
+**重要：content 中不要写 markdown 表格**（表格数据会由系统自动渲染在下方）。用自然语言描述关键数字即可，如\"运动户外品类以100万元领先，其次是母婴用品85万元\"。
+
+### 3. 按需输出
+根据用户问题灵活决定输出内容：
+- 概览型问题（"数据怎么样""有几列"）→ 纯文字回答，不需要代码和图表
+- 排名/对比问题（"最高""最低""Top10"）→ 文字结论 + 表格 + 可选柱状图
+- 占比/分布问题（"占比""分布""构成"）→ 文字结论 + 可选饼图
+- 趋势问题（"趋势""变化""增长"）→ 文字结论 + 可选折线图
+- 纯计算问题（"平均""总和"）→ 文字结论即可，不需要图表
+
+### 4. 图表智能选择（仅在"一图胜千言"时输出 chart_config）
+- 时间序列数据（日期/月份列）→ type: "line"（折线图）
+- 分类对比（类别≤6个）→ type: "pie"（饼图，展示占比）
+- 分类对比（类别7~20个）→ type: "bar"（柱状图）
+- 类别>20个 → 取Top10做柱状图
+- 纯统计数字 → 不需要图表
+
+### 5. 代码原则
+- 直接操作 df 变量，禁止 import / read_excel / read_csv / open / print()
+- 最后一行是表达式（其值会被自动捕获为结果）
+- **查询 Top N 时使用 head(10) 或 nlargest(10)，不要只取 head(3)**，确保图表有足够数据点
+- 如果不需要计算就不要写 code（设为空字符串）
+
+## 输出 JSON 格式
+{{
+  "content": "markdown 格式的自然语言回答（这是主要输出，用户看到的内容）",
+  "code": "可选的 pandas 代码（不需要时为空字符串）",
+  "chart_config": {{"type":"bar|line|pie","x":"列名","y":"列名","title":"标题","data":[{{...}}]}} 或 null
+}}
+
+注意: chart_config 和 code 仅在必要时输出。不需要就设为 null / ""。
 """
 
 
@@ -172,39 +211,35 @@ def _build_df_info(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def _parse_llm_response(response: str) -> dict:
-    """解析 LLM 响应，提取文字解读 + 代码 + 图表配置"""
-    result = {"answer": "", "code": "", "chart": None}
+def _extract_json(text: str) -> dict:
+    """
+    从 LLM 响应中提取 JSON 对象。
+    处理 markdown 代码块包裹、首尾多余文字等情况。
+    """
+    # 尝试直接解析
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
 
-    # 1. 提取 SPEC:CHART: — 用贪婪匹配处理嵌套JSON
-    chart_match = re.search(r'SPEC:CHART:\s*(\{.+\})\s*$', response, re.DOTALL)
-    if not chart_match:
-        chart_match = re.search(r'SPEC:CHART:\s*(\{.+\})', response, re.DOTALL)
-    if chart_match:
+    # 提取 markdown ```json ... ``` 代码块
+    m = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+    if m:
         try:
-            result["chart"] = json.loads(chart_match.group(1))
+            return json.loads(m.group(1).strip())
         except json.JSONDecodeError:
-            logger.warning(f"图表JSON解析失败: {chart_match.group(1)[:100]}")
+            pass
 
-    # 2. 提取 SPEC:CODE: — 匹配到行尾或 SPEC:CHART:
-    code_match = re.search(r'SPEC:CODE:\s*\n?(.+?)(?:SPEC:CHART:|$)', response, re.DOTALL)
-    if code_match:
-        result["code"] = code_match.group(1).strip()
+    # 提取 { ... } 最外层 JSON 对象
+    m = re.search(r'\{.*\}', text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
 
-    # 3. 清理答案: 移除所有 SPEC: 标记及后面的内容
-    answer = response
-    # 先移除 SPEC:CHART 行
-    answer = re.sub(r'\n*SPEC:CHART:\s*\{.+\}.*$', '', answer, flags=re.DOTALL)
-    # 再移除 SPEC:CODE 行及后面的代码
-    answer = re.sub(r'\n*SPEC:CODE:.*$', '', answer, flags=re.DOTALL)
-    # 移除 "以下是生成上述分析结果的代码" 之类引导语
-    answer = re.sub(r'\n*以下是生成.*代码[：:]*\s*$', '', answer)
-    result["answer"] = answer.strip()
+    raise ValueError(f"无法从响应中提取 JSON: {text[:200]}...")
 
-    return result
-
-
-# ====== LLM 调用 ======
 
 def _get_llm():
     """获取 LLM 实例"""
@@ -214,21 +249,140 @@ def _get_llm():
         base_url=settings.LLM_BASE_URL,
         temperature=0,
         timeout=settings.LLM_TIMEOUT,
+        max_tokens=4096,
     )
 
 
-def analyze_with_llm(file_path: str, question: str) -> dict:
+def _is_datetime_column(series: pd.Series) -> bool:
+    """检测列是否为时间/日期类型"""
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return True
+    if series.dtype == 'object':
+        try:
+            pd.to_datetime(series.dropna().head(10))
+            return True
+        except (ValueError, TypeError):
+            pass
+    return False
+
+
+def _smart_chart_type(
+    df: pd.DataFrame,
+    result: dict,
+    user_question: str = "",
+) -> dict | None:
     """
-    主函数: LLM 驱动的数据分析对话。
+    基于数据特征智能选择图表类型。
+    返回图表配置 dict 或 None（不需要图表）。
+
+    判断逻辑:
+    1. 时间序列 → line
+    2. 低基数分类(≤6) → pie
+    3. 中基数分类(7-20) → bar
+    4. 高基数(>20) → bar (Top10)
+    5. 纯标量结果 → None (不需要图表)
+    """
+    # 标量结果 → 不需要图表
+    if result.get("type") == "scalar":
+        return None
+
+    if result.get("type") == "dataframe":
+        df_result = pd.DataFrame(
+            result["rows"], columns=result["columns"]
+        )
+        numeric_cols = df_result.select_dtypes(include=["number"]).columns.tolist()
+        if not numeric_cols or len(df_result.columns) < 2:
+            return None
+
+        x_col = df_result.columns[0]
+        y_col = numeric_cols[0]
+        n_categories = len(df_result)
+
+        # 1. 时间序列检测
+        if x_col in df.columns and _is_datetime_column(df[x_col]):
+            chart_type = "line"
+            title = f"{y_col} 变化趋势"
+        # 2. 低基数 → 饼图
+        elif n_categories <= 6:
+            chart_type = "pie"
+            title = f"{y_col} 按{x_col}分布"
+        # 3. 中基数 → 柱状图
+        elif n_categories <= 20:
+            chart_type = "bar"
+            title = f"{y_col} 按{x_col}排名"
+        # 4. 高基数 → 柱状图 (Top10已在execute中截断)
+        else:
+            chart_type = "bar"
+            title = f"Top {n_categories} {x_col} {y_col}对比"
+
+        return {
+            "type": chart_type,
+            "x": x_col,
+            "y": y_col,
+            "title": title,
+            "data": [
+                dict(zip(df_result.columns.tolist(), row))
+                for row in result["rows"][:20]
+            ],
+        }
+
+    if result.get("type") == "series":
+        data = result.get("data", {})
+        if data and len(data) >= 1:
+            series_name = result.get("name", "值")
+            n_cat = len(data)
+            keys = list(data.keys())
+
+            # 检测 key 是否为日期 → 折线图
+            is_date_keys = False
+            try:
+                pd.to_datetime(pd.Series(keys[:10]), format='mixed', dayfirst=False)
+                is_date_keys = True
+            except (ValueError, TypeError):
+                pass
+
+            if is_date_keys and n_cat >= 3:
+                chart_type = "line"
+                title = f"{series_name} 变化趋势"
+            elif n_cat <= 6:
+                chart_type = "pie"
+                title = f"{series_name} 分布"
+            else:
+                chart_type = "bar"
+                title = f"{series_name} 排名 (Top 20)"
+
+            return {
+                "type": chart_type,
+                "x": "类别",
+                "y": series_name,
+                "title": title,
+                "data": [
+                    {"类别": str(k), series_name: v}
+                    for k, v in list(data.items())[:20]
+                ],
+            }
+
+    return None
+
+
+def _build_chart_from_result(result: dict) -> dict:
+    """从代码执行结果自动构建图表配置（向后兼容包装）"""
+    return _smart_chart_type(pd.DataFrame(), result) or {}
+
+
+def analyze_with_llm(file_path: str, question: str, with_chart: bool = True) -> dict:
+    """
+    主函数: LLM 驱动的数据分析对话 - 使用结构化输出。
 
     Args:
         file_path: Excel/CSV 文件路径
         question: 用户自然语言问题
+        with_chart: 是否自动生成图表 (默认 True)
 
     Returns:
         {"answer": str, "code": str, "result": dict, "chart": dict|null}
     """
-    # 1. 安全路径验证 + 加载数据
+    # 1. 加载数据
     safe_path = validate_file_path(file_path)
     if not os.path.exists(safe_path):
         return {"answer": f"文件不存在: {safe_path}", "code": "", "result": None, "chart": None}
@@ -237,12 +391,18 @@ def analyze_with_llm(file_path: str, question: str) -> dict:
     try:
         if ext in (".xlsx", ".xls"):
             df = pd.read_excel(safe_path)
+            unnamed_count = sum(1 for c in df.columns if 'Unnamed' in str(c))
+            if unnamed_count > len(df.columns) * 0.5:
+                logger.info(f"检测到标题行，使用 header=1 ({unnamed_count}/{len(df.columns)} Unnamed)")
+                df = pd.read_excel(safe_path, header=1)
+            df.columns = [str(c).strip() for c in df.columns]
+            df = df.dropna(axis=1, how='all')
         elif ext == ".csv":
-            for enc in ["utf-8", "gbk", "gb2312", "latin-1"]:
+            for enc in ["utf-8", "gbk", "gb2312", "latin-1", "utf-16"]:
                 try:
                     df = pd.read_csv(safe_path, encoding=enc)
                     break
-                except UnicodeDecodeError:
+                except (UnicodeDecodeError, UnicodeError):
                     continue
             else:
                 return {"answer": "无法识别 CSV 编码", "code": "", "result": None, "chart": None}
@@ -255,73 +415,280 @@ def analyze_with_llm(file_path: str, question: str) -> dict:
     df_info = _build_df_info(df)
     system_prompt = DATA_CHAT_SYSTEM.format(df_info=df_info)
 
-    # 3. LLM 生成代码
+    # 3. LLM 调用 (不使用 with_structured_output，DeepSeek 不支持)
     try:
         llm = _get_llm()
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
-        ]
-        response = llm.invoke([(msg["role"], msg["content"]) for msg in messages])
-        llm_text = response.content
+        json_system = system_prompt + (
+            "\n\n**你必须只输出一个 JSON 对象，不要包含任何其他文字、markdown 代码块标记或解释。**"
+            "\nJSON 格式：{\"content\":\"markdown自然语言回答\", \"code\":\"可选的pandas代码或空字符串\", \"chart_config\":{...}或null}"
+        )
+        raw = llm.invoke([
+            SystemMessage(content=json_system),
+            HumanMessage(content=question),
+        ])
+        text = raw.content.strip() if hasattr(raw, 'content') else str(raw).strip()
+        # 提取 JSON（处理可能的 markdown 代码块包裹）
+        parsed = _extract_json(text)
+        response = DataAnalysisOutput(**parsed)
     except Exception as e:
-        logger.error(f"LLM 调用失败: {e}")
+        logger.error(f"LLM 结构化输出失败: {e}")
         return {"answer": f"LLM 调用失败: {e}", "code": "", "result": None, "chart": None}
 
-    # 4. 解析响应
-    parsed = _parse_llm_response(llm_text)
-
-    # 5. 执行代码
+    # 4. 执行代码
+    answer = response.content
+    # 兜底：过滤 LLM 可能误输出的 markdown 表格
+    # 匹配: header_row \n separator_row \n data_rows
+    answer = re.sub(
+        r'\n\|[^\n]+\|\s*\n\|[-\s|:]+\|\s*\n(?:\|[^\n]+\|\s*\n)*',
+        '\n', answer
+    )
+    # 清除残留的行数提示
+    answer = re.sub(r'\n\*显示前\d+行.*\*', '', answer)
+    code = response.code or ""
     result = None
-    if parsed["code"]:
+    if code:
         try:
-            result = _execute_sandbox(parsed["code"], df)
+            result = _execute_sandbox(code, df)
         except ValueError as e:
             result = {"type": "error", "error": f"安全检查: {e}"}
 
-    # 6. 补全答案: LLM 只给半句话时, 用执行结果补齐
-    answer = parsed["answer"]
+    # 5. 补全答案 — 仅补充关键结果数字，表格/图表由前端结构化渲染
     if result and result.get("type") != "error":
-        if result["type"] == "scalar" and len(answer) < 80:
-            answer = f"{answer}\n\n**结果:** {result['value']}"
+        if result["type"] == "scalar":
+            val = result.get("value")
+            if val is not None and len(answer) < 120:
+                answer = f"{answer}\n\n> 结果: {val}"
         elif result["type"] == "dataframe":
-            # 表格: 自动生成 markdown 表格补到答案
+            # 不注入表格到回答文字 — 前端通过 data_result 事件单独渲染
             cols = result.get("columns", [])
             rows = result.get("rows", [])
+            shape = result.get("shape", [0, 0])
             if cols and rows:
-                md = "\n" + "| " + " | ".join(str(c) for c in cols) + " |\n"
-                md += "|" + "|".join("------" for _ in cols) + "|\n"
-                for row in rows[:20]:
-                    md += "| " + " | ".join(str(c)[:40] for c in row) + " |\n"
-                if len(rows) > 20:
-                    md += f"\n*显示前20行，共{len(rows)}行*"
-                answer = f"{answer}\n{md}"
+                preview = ", ".join(
+                    f"{cols[0]}={rows[0][0]}" if rows else ""
+                )[:80]
+                answer += f"\n\n> 📊 数据: {shape[0]}行×{shape[1]}列，含表格和图表见下方"
         elif result["type"] == "series":
             data = result.get("data", {})
-            if data and len(answer) < 100:
-                items = [f"- {k}: {v}" for k, v in list(data.items())[:15]]
-                answer = f"{answer}\n" + "\n".join(items)
+            if data:
+                keys = list(data.keys())
+                preview = ", ".join(f"{k}={v}" for k, v in list(data.items())[:3])
+                answer += f"\n\n> 📊 {len(data)}项数据: {preview}..."
 
-    # 7. 图表推断
-    chart = parsed.get("chart")
-    if not chart and result and result.get("type") == "dataframe":
-        df_result = pd.DataFrame(result["rows"], columns=result["columns"])
-        numeric_cols = df_result.select_dtypes(include=["number"]).columns.tolist()
-        if len(numeric_cols) >= 1:
-            chart = {
-                "type": "bar",
-                "x": df_result.columns[0] if len(df_result.columns) > 0 else numeric_cols[0],
-                "y": numeric_cols[0],
-                "title": f"{numeric_cols[0]} 分布",
-                "data": [dict(zip(df_result.columns.tolist(), row)) for row in result["rows"][:20]],
-            }
+    # 6. 图表
+    chart = None
+    if with_chart:
+        # 优先从实际执行结果生成图表数据（而非 LLM 猜测的 sample data）
+        if result and result.get("type") != "error":
+            chart = _smart_chart_type(df, result, question)
+        # LLM 给的 chart_config 中有类型/坐标轴偏好，覆盖智能推断
+        if chart and response.chart_config:
+            if response.chart_config.type:
+                chart["type"] = response.chart_config.type
+            if response.chart_config.x:
+                chart["x"] = response.chart_config.x
+            if response.chart_config.y:
+                chart["y"] = response.chart_config.y
+            if response.chart_config.title and response.chart_config.title != "图表":
+                chart["title"] = response.chart_config.title
+        elif not chart and response.chart_config and response.chart_config.data:
+            # 无执行结果但 LLM 给了 chart → 用 LLM 的数据（兜底）
+            chart = response.chart_config.model_dump()
 
     return {
         "answer": answer,
-        "code": parsed["code"],
+        "code": code,
         "result": result,
         "chart": chart,
     }
+
+
+# ====== Word 报告生成 ======
+
+def generate_data_report(
+    file_path: str,
+    conversation_history: list[dict] | None = None,
+) -> str:
+    """
+    生成 Word 数据分析报告。
+
+    Args:
+        file_path: Excel/CSV 数据文件路径
+        conversation_history: 多轮对话历史 [{"question": "...", "answer": "..."}, ...]
+
+    Returns:
+        报告文件路径 (data/reports/report_{timestamp}.docx)
+    """
+    import os as _os
+    from app.tools.registry import ensure_directory
+
+    safe_path = validate_file_path(file_path)
+    if not _os.path.exists(safe_path):
+        raise FileNotFoundError(f"文件不存在: {safe_path}")
+
+    # 1. 加载数据
+    ext = _os.path.splitext(safe_path)[1].lower()
+    try:
+        if ext in (".xlsx", ".xls"):
+            df = pd.read_excel(safe_path)
+            df.columns = [str(c).strip() for c in df.columns]
+        elif ext == ".csv":
+            for enc in ["utf-8", "gbk", "gb2312", "latin-1"]:
+                try:
+                    df = pd.read_csv(safe_path, encoding=enc)
+                    break
+                except (UnicodeDecodeError, UnicodeError):
+                    continue
+            else:
+                raise ValueError("无法识别 CSV 编码")
+        else:
+            raise ValueError(f"不支持的文件格式: {ext}")
+    except Exception as e:
+        raise ValueError(f"文件读取失败: {e}") from e
+
+    # 2. 生成报告概述文字 (LLM)
+    df_info = _build_df_info(df)
+    report_prompt = f"""你是一个数据分析师。为以下数据写一份报告摘要（200-300字）。
+
+数据概况:
+{df_info}
+
+请生成一段专业的报告文字，包含：
+1. 数据整体概况（行数列数，覆盖范围）
+2. 2-3个关键发现或洞察
+3. 简要的业务建议
+
+只输出报告文字，不要JSON格式。"""
+
+    overview_text = ""
+    try:
+        llm = _get_llm()
+        raw = llm.invoke([HumanMessage(content=report_prompt)])
+        overview_text = raw.content.strip() if hasattr(raw, 'content') else str(raw).strip()
+    except Exception as e:
+        logger.warning(f"LLM 报告概述生成失败: {e}")
+        overview_text = f"数据包含 {len(df)} 行、{len(df.columns)} 列。"
+
+    # 3. 生成图表 (matplotlib PNG)
+    chart_paths: list[str] = []
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        output_dir = "data/reports"
+        ensure_directory(output_dir)
+
+        # 只为数值列生成图表
+        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+        categorical_cols = df.select_dtypes(include=["object"]).columns.tolist()
+
+        if numeric_cols and categorical_cols:
+            # 分类汇总柱状图
+            cat_col = categorical_cols[0]
+            top_cats = df.groupby(cat_col)[numeric_cols[0]].sum().nlargest(8)
+            fig, ax = plt.subplots(figsize=(8, 5))
+            top_cats.plot(kind="bar", ax=ax, color="#4F46E5")
+            ax.set_title(f"{numeric_cols[0]} 按{cat_col}汇总 (Top 8)")
+            ax.set_xlabel(cat_col)
+            ax.set_ylabel(numeric_cols[0])
+            plt.xticks(rotation=30, ha="right")
+            fig.tight_layout()
+            chart_path = _os.path.join(
+                output_dir, f"chart_bar_{pd.Timestamp.now().strftime('%H%M%S_%f')}.png"
+            )
+            fig.savefig(chart_path, dpi=150)
+            plt.close(fig)
+            chart_paths.append(chart_path)
+
+        if len(numeric_cols) >= 1:
+            # 数值分布直方图
+            fig, ax = plt.subplots(figsize=(8, 4))
+            df[numeric_cols[0]].dropna().hist(bins=20, ax=ax, color="#10B981")
+            ax.set_title(f"{numeric_cols[0]} 分布")
+            ax.set_xlabel(numeric_cols[0])
+            ax.set_ylabel("频次")
+            fig.tight_layout()
+            chart_path = _os.path.join(
+                output_dir, f"chart_hist_{pd.Timestamp.now().strftime('%H%M%S_%f')}.png"
+            )
+            fig.savefig(chart_path, dpi=150)
+            plt.close(fig)
+            chart_paths.append(chart_path)
+    except Exception as e:
+        logger.warning(f"图表生成失败: {e}")
+
+    # 4. 构建 Word 文档
+    try:
+        from docx import Document
+        from docx.shared import Inches, Pt
+    except ImportError:
+        raise ImportError("python-docx 未安装，请运行: pip install python-docx")
+
+    doc = Document()
+
+    # 封面
+    doc.add_heading("数据分析报告", level=0)
+    doc.add_paragraph(f"生成时间: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    file_name = _os.path.basename(safe_path)
+    doc.add_paragraph(f"数据来源: {file_name}")
+    doc.add_paragraph("")
+
+    # 报告概述
+    doc.add_heading("报告概述", level=1)
+    doc.add_paragraph(overview_text)
+
+    # 数据概览
+    doc.add_heading("数据概览", level=1)
+    doc.add_paragraph(f"行数: {len(df)} | 列数: {len(df.columns)}")
+    doc.add_paragraph(f"列名: {', '.join(str(c) for c in df.columns)}")
+
+    # 描述统计
+    doc.add_heading("描述统计", level=1)
+    desc = df.describe()
+    # 构建描述统计表格
+    table = doc.add_table(rows=len(desc) + 1, cols=len(desc.columns) + 1, style="Light Grid Accent 1")
+    table.cell(0, 0).text = "统计量"
+    for j, col in enumerate(desc.columns):
+        table.cell(0, j + 1).text = str(col)
+    for i, idx in enumerate(desc.index):
+        table.cell(i + 1, 0).text = str(idx)
+        for j, col in enumerate(desc.columns):
+            val = desc.loc[idx, col]
+            if isinstance(val, (int, float, np.integer, np.floating)):
+                table.cell(i + 1, j + 1).text = f"{float(val):.2f}"
+            else:
+                table.cell(i + 1, j + 1).text = str(val)
+
+    # 对话历史
+    if conversation_history:
+        doc.add_heading("分析对话", level=1)
+        for i, turn in enumerate(conversation_history, 1):
+            doc.add_heading(f"问题 {i}", level=2)
+            doc.add_paragraph(turn.get("question", ""))
+            doc.add_paragraph(turn.get("answer", ""))
+
+    # 图表
+    if chart_paths:
+        doc.add_heading("可视化图表", level=1)
+        for path in chart_paths:
+            if _os.path.exists(path):
+                try:
+                    doc.add_picture(path, width=Inches(5.5))
+                    caption = _os.path.basename(path).replace(".png", "")
+                    doc.add_paragraph(caption).italic = True
+                except Exception as e:
+                    logger.warning(f"插入图片失败 {path}: {e}")
+
+    # 保存
+    ensure_directory("data/reports")
+    report_path = _os.path.join(
+        "data/reports",
+        f"report_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S_%f')}.docx",
+    )
+    doc.save(report_path)
+    logger.info(f"Word 报告已生成: {report_path}")
+    return report_path
 
 
 # ====== LangChain 工具包装 ======
@@ -343,12 +710,10 @@ class DataConversationTool(BaseTool):
     args_schema: type[BaseModel] = DataChatInput
 
     def _run(self, file_path: str, question: str = "", query: str = "") -> str:
-        # 兼容 LLM 可能传 query 或 question
         q = question or query or ""
         result = analyze_with_llm(file_path, q)
         answer = result["answer"]
 
-        # 错误信息直接展示
         if result.get("result") and result["result"].get("type") == "error":
             answer += f"\n\n⚠️ {result['result']['error']}"
         elif result.get("result") and result["result"].get("type") == "scalar":
@@ -358,8 +723,5 @@ class DataConversationTool(BaseTool):
             elif len(val_str) > 500:
                 val_str = val_str[:500] + "..."
             answer += f"\n\n**结果:** {val_str}"
-
-        # 代码和分析过程不输出到对话 (仅用于内部)
-        # 表格/图表由 SSE data_result 事件单独推送
 
         return answer

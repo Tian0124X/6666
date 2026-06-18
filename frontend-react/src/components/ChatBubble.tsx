@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { Bot, User, ChevronDown, ChevronRight, Code2 } from "lucide-react";
+import { Bot, User, ChevronDown, ChevronRight, Code2, BarChart3, LineChart as LineChartIcon, PieChart as PieChartIcon, FileDown } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage } from "../stores/chatStore";
+import type { ChatMessage, ChartConfig } from "../stores/chatStore";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line,
@@ -81,30 +81,44 @@ export function ChatBubble({ msg }: { msg: ChatMessage }) {
             )}
 
             {/* Chart */}
-            {dr?.type === "chart" && dr.chart && <ChartView chart={dr.chart} />}
             {dr?.chart && <ChartView chart={dr.chart} />}
 
             {/* Code - collapsed by default */}
             {msg.code && (
               <div>
                 <button onClick={() => setShowCode(!showCode)}
+                  aria-expanded={showCode} aria-controls={`code-${msg.id}`}
                   className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
                   {showCode ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
                   <Code2 className="w-3 h-3" />
                   查看分析代码
                 </button>
                 {showCode && (
-                  <pre className="mt-1 p-2 rounded bg-accent text-xs overflow-x-auto font-mono max-h-40">
+                  <pre id={`code-${msg.id}`} className="mt-1 p-2 rounded bg-accent text-xs overflow-x-auto font-mono max-h-40">
                     {msg.code}
                   </pre>
                 )}
+              </div>
+            )}
+
+            {/* Report download button */}
+            {dr && msg.dataFilePath && (
+              <div className="pt-1">
+                <a
+                  href={`/api/chat/report/generate?file_path=${encodeURIComponent(msg.dataFilePath)}`}
+                  download
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-xs hover:bg-primary/20 transition-colors"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  下载 Word 报告
+                </a>
               </div>
             )}
           </div>
         )}
 
         {/* Streaming cursor */}
-        {msg.isStreaming && <span className="inline-block w-2 h-4 bg-primary animate-pulse rounded-sm ml-0.5" />}
+        {msg.isStreaming && <span aria-live="polite" aria-label="AI 正在生成回答..." className="inline-block w-2 h-4 bg-primary animate-pulse rounded-sm ml-0.5" />}
 
         {/* Task badge */}
         {msg.taskType && (
@@ -127,7 +141,7 @@ export function ChatBubble({ msg }: { msg: ChatMessage }) {
           <div className="mt-2 pt-2 border-t border-border">
             <p className="text-xs text-muted-foreground mb-1">📚 参考来源:</p>
             {msg.sources.slice(0, 3).map((s, i) => (
-              <p key={i} className="text-xs text-muted-foreground truncate">· {s.filename}: {s.excerpt.slice(0, 80)}...</p>
+              <p key={i} className="text-xs text-muted-foreground truncate">· {s.filename}: {(s.excerpt || '').slice(0, 80)}...</p>
             ))}
           </div>
         )}
@@ -136,26 +150,51 @@ export function ChatBubble({ msg }: { msg: ChatMessage }) {
   );
 }
 
-function ChartView({ chart }: { chart: Record<string, unknown> }) {
-  const type = chart.type as string || "bar";
-  const dataKey = (chart.y as string) || "value";
-  const nameKey = (chart.x as string) || "name";
-  const rawData = (chart.data as Record<string, unknown>[]) || [];
+function ChartView({ chart }: { chart: ChartConfig }) {
+  const defaultType = chart.type || "bar";
+  const [chartType, setChartType] = useState(defaultType);
+  const dataKey = chart.y || "value";
+  const nameKey = chart.x || "name";
+  const rawData = chart.data || [];
 
   if (rawData.length === 0) return null;
 
+  const chartTypes = [
+    { id: "bar", icon: BarChart3, label: "柱状图" },
+    { id: "line", icon: LineChartIcon, label: "折线图" },
+    { id: "pie", icon: PieChartIcon, label: "饼图" },
+  ] as const;
+
   return (
     <div className="h-64 w-full">
-      <p className="text-xs text-muted-foreground mb-1">{(chart.title as string) || "图表"}</p>
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-xs text-muted-foreground">{(chart.title as string) || "图表"}</p>
+        <div className="flex gap-0.5 bg-muted rounded-md p-0.5">
+          {chartTypes.map(({ id, icon: Icon, label }) => (
+            <button
+              key={id}
+              onClick={() => setChartType(id)}
+              title={label}
+              className={`px-1.5 py-0.5 rounded text-xs transition-colors ${
+                chartType === id
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+            </button>
+          ))}
+        </div>
+      </div>
       <ResponsiveContainer>
-        {type === "pie" ? (
+        {chartType === "pie" ? (
           <PieChart>
             <Pie data={rawData} dataKey={dataKey} nameKey={nameKey} cx="50%" cy="50%" outerRadius={80} label>
               {rawData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
             </Pie>
             <Tooltip />
           </PieChart>
-        ) : type === "line" ? (
+        ) : chartType === "line" ? (
           <LineChart data={rawData}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey={nameKey} tick={{ fontSize: 11 }} />

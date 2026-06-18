@@ -10,6 +10,7 @@ import app.tools.data_analyzer  # noqa
 import app.tools.data_conversation  # noqa
 import app.tools.oa_crm  # noqa
 import app.tools.knowledge_search  # noqa
+import app.tools.web_search  # noqa: 修复 WebSearchTool 未注册
 
 router = APIRouter()
 

@@ -90,12 +90,15 @@ export default function KnowledgePage() {
     setLoading(false);
   };
 
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
   const handleDelete = async (filename: string) => {
     try {
       await knowledgeApi.deleteDoc(filename);
       fetchDocs();
     } catch (e: unknown) {
-      alert(`删除失败: ${e instanceof Error ? e.message : String(e)}`);
+      setDeleteError(e instanceof Error ? e.message : "删除失败");
+      setTimeout(() => setDeleteError(null), 5000);
     }
   };
 
@@ -132,6 +135,11 @@ export default function KnowledgePage() {
       {/* Content */}
       <div className="flex-1 overflow-auto">
         <div className="max-w-4xl mx-auto p-6 space-y-6">
+          {deleteError && (
+            <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-4 py-3 text-red-600 text-sm">
+              {deleteError}
+            </div>
+          )}
           {tab === "qa" && (
             <div className="bg-card border border-border rounded-xl p-6 space-y-4">
               <h3 className="font-medium">知识问答</h3>

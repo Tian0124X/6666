@@ -45,17 +45,23 @@ class DataAnalyzerTool(BaseTool):
     # ====== 内部方法 ======
 
     def _load_data(self, file_path: str) -> pd.DataFrame:
-        """加载 Excel/CSV，自动检测编码"""
+        """加载 Excel/CSV，自动检测编码 + 文件大小检查"""
+        # 文件大小 guard (最大 100MB)
+        MAX_FILE_SIZE = 100 * 1024 * 1024
+        file_size = os.path.getsize(file_path)
+        if file_size > MAX_FILE_SIZE:
+            raise ValueError(f"文件过大 ({file_size / 1024 / 1024:.1f}MB)，最大支持 100MB")
+
         ext = os.path.splitext(file_path)[1].lower()
         if ext in (".xlsx", ".xls"):
             return pd.read_excel(file_path)
         elif ext == ".csv":
-            for enc in ["utf-8", "gbk", "gb2312", "latin-1"]:
+            for enc in ["utf-8", "gbk", "gb2312", "latin-1", "utf-16"]:
                 try:
                     return pd.read_csv(file_path, encoding=enc)
-                except UnicodeDecodeError:
+                except (UnicodeDecodeError, UnicodeError):
                     continue
-            raise ValueError("无法识别 CSV 编码，已尝试 utf-8/gbk/gb2312/latin-1")
+            raise ValueError("无法识别 CSV 编码，已尝试 utf-8/gbk/gb2312/latin-1/utf-16")
         else:
             raise ValueError(f"不支持的文件格式: {ext}，仅支持 xlsx/xls/csv")
 

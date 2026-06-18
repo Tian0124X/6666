@@ -8,17 +8,22 @@ interface ThemeStore {
   setTheme: (t: Theme) => void;
 }
 
+const getInitialTheme = (): Theme => {
+  try { return (localStorage.getItem("theme") as Theme) || "light"; }
+  catch { return "light"; }
+};
+
 export const useThemeStore = create<ThemeStore>((set) => ({
-  theme: (localStorage.getItem("theme") as Theme) || "light",
+  theme: getInitialTheme(),
   toggle: () =>
     set((s) => {
       const next = s.theme === "light" ? "dark" : "light";
-      localStorage.setItem("theme", next);
+      try { localStorage.setItem("theme", next); } catch { /* privacy mode */ }
       document.documentElement.classList.toggle("dark", next === "dark");
       return { theme: next };
     }),
   setTheme: (t) => {
-    localStorage.setItem("theme", t);
+    try { localStorage.setItem("theme", t); } catch { /* privacy mode */ }
     document.documentElement.classList.toggle("dark", t === "dark");
     set({ theme: t });
   },

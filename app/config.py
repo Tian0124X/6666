@@ -1,9 +1,22 @@
 """全局配置管理 — 从环境变量读取所有配置项"""
 
 import os
+import logging
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+
+def _int_env(key: str, default: int) -> int:
+    """安全读取整数环境变量，格式错误时回退默认值并告警"""
+    val = os.getenv(key, str(default))
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        logger.warning(f"配置 {key}={val} 不是有效整数，使用默认 {default}")
+        return default
 
 
 class Settings:
@@ -16,25 +29,25 @@ class Settings:
         "LLM_BASE_URL",
         "https://api.deepseek.com",
     )
-    LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "30"))
+    LLM_TIMEOUT: int = _int_env("LLM_TIMEOUT", 30)
 
     # === Redis ===
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
     # === MySQL ===
     MYSQL_HOST: str = os.getenv("MYSQL_HOST", "localhost")
-    MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", "3306"))
+    MYSQL_PORT: int = _int_env("MYSQL_PORT", 3306)
     MYSQL_USER: str = os.getenv("MYSQL_USER", "eao_user")
     MYSQL_PASSWORD: str = os.getenv("MYSQL_PASSWORD", "")
     MYSQL_DATABASE: str = os.getenv("MYSQL_DATABASE", "enterprise_ai_office")
 
     # === ChromaDB ===
     CHROMA_HOST: str = os.getenv("CHROMA_HOST", "localhost")
-    CHROMA_PORT: int = int(os.getenv("CHROMA_PORT", "8001"))
+    CHROMA_PORT: int = _int_env("CHROMA_PORT", 8001)
 
     # === PostgreSQL + pgvector (可选) ===
     PG_HOST: str = os.getenv("PG_HOST", "localhost")
-    PG_PORT: int = int(os.getenv("PG_PORT", "5432"))
+    PG_PORT: int = _int_env("PG_PORT", 5432)
     PG_DATABASE: str = os.getenv("PG_DATABASE", "enterprise_ai_office")
     PG_USER: str = os.getenv("PG_USER", "eao_user")
     PG_PASSWORD: str = os.getenv("PG_PASSWORD", "")
@@ -42,7 +55,7 @@ class Settings:
     # === 应用 ===
     APP_ENV: str = os.getenv("APP_ENV", "development")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-    MAX_RETRY: int = int(os.getenv("MAX_RETRY", "3"))
+    MAX_RETRY: int = _int_env("MAX_RETRY", 3)
 
     # === SSO / LDAP ===
     LDAP_ENABLED: bool = os.getenv("LDAP_ENABLED", "false").lower() == "true"

@@ -23,18 +23,25 @@ interface Props {
 
 export function ApprovalDialog({ approval, onApprove, onReject }: Props) {
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handle = async (action: "approve" | "reject") => {
     setLoading(true);
+    setError(null);
     try {
+      const res = await fetch(`/api/chat/approvals/${approval.thread_id}/${action}`, { method: "POST" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+        throw new Error(err.detail || `操作失败 (${res.status})`);
+      }
       if (action === "approve") {
-        await fetch(`/api/chat/approvals/${approval.thread_id}/approve`, { method: "POST" });
         onApprove();
       } else {
-        await fetch(`/api/chat/approvals/${approval.thread_id}/reject`, { method: "POST" });
         onReject();
       }
-    } catch { /* ignore */ }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "操作失败，请重试");
+    }
     setLoading(false);
   };
 
@@ -71,6 +78,12 @@ export function ApprovalDialog({ approval, onApprove, onReject }: Props) {
             </div>
           )}
         </div>
+
+        {error && (
+          <div className="mb-4 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-600 text-sm">
+            {error}
+          </div>
+        )}
 
         <div className="flex gap-3">
           <button

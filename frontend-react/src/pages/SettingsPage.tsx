@@ -4,12 +4,14 @@ import { Settings, Moon, Sun } from "lucide-react";
 
 export default function SettingsPage() {
   const { theme, toggle, setTheme } = useThemeStore();
-  const [model, setModel] = useState(() =>
-    localStorage.getItem("settings_model") || "deepseek-chat"
-  );
-  const [temperature, setTemperature] = useState(() =>
-    Number(localStorage.getItem("settings_temperature") || "0.5")
-  );
+  const [model, setModel] = useState(() => {
+    try { return localStorage.getItem("settings_model") || "deepseek-chat"; }
+    catch { return "deepseek-chat"; }
+  });
+  const [temperature, setTemperature] = useState(() => {
+    try { return Number(localStorage.getItem("settings_temperature") || "0.5"); }
+    catch { return 0.5; }
+  });
   const [tools, setTools] = useState(() => {
     try {
       const saved = localStorage.getItem("settings_tools");
@@ -19,7 +21,9 @@ export default function SettingsPage() {
     }
   });
 
-  const persist = (key: string, value: string) => localStorage.setItem(key, value);
+  const persist = (key: string, value: string) => {
+    try { localStorage.setItem(key, value); } catch { /* privacy mode */ }
+  };
 
   return (
     <div className="h-screen flex flex-col">

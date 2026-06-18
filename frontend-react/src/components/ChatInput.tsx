@@ -45,6 +45,24 @@ export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, di
   const handleDataFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !onDataFile) return;
+
+    // 文件大小校验 (最大 50MB)
+    const MAX_SIZE = 50 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+      alert(`文件过大 (${(file.size / 1024 / 1024).toFixed(1)}MB)，最大支持 50MB`);
+      if (dataFileRef.current) dataFileRef.current.value = "";
+      return;
+    }
+
+    // 文件扩展名校验
+    const allowedExts = [".xlsx", ".xls", ".csv"];
+    const fileName = file.name.toLowerCase();
+    if (!allowedExts.some((ext) => fileName.endsWith(ext))) {
+      alert(`不支持的文件格式，请上传 Excel (.xlsx, .xls) 或 CSV (.csv) 文件`);
+      if (dataFileRef.current) dataFileRef.current.value = "";
+      return;
+    }
+
     setUploading(true);
     try {
       const { knowledgeApi } = await import("../lib/api");

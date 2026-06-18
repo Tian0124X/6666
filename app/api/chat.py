@@ -4,10 +4,11 @@
 """
 
 import json
+import os
 import logging
 from typing import List
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse, FileResponse
 from app.config import settings
 from app.models.request import ChatRequest
 from app.models.response import ChatResponse
@@ -138,31 +139,10 @@ async def chat_stream(req: ChatRequest):
     async def event_generator():
         memory = await get_memory_store()
 
-        # ====== 快速通道: 数据文件分析 ======
-        import re
-        file_match = re.search(r'\[已上传数据文件:\s*([^\]]+)\]', req.message)
-        if file_match:
-            file_path = file_match.group(1).strip()
-            user_question = re.sub(r'\[已上传数据文件:\s*[^\]]+\]\s*', '', req.message).strip()
-            user_question = user_question.replace('用户问题:', '').strip() or "请分析这份数据"
-
-            logger.info(f"数据快速通道: file={file_path}, question={user_question[:80]}")
-
-            import asyncio
-            from app.tools.data_conversation import analyze_with_llm
-
-            yield f"data: {json.dumps({'status': '正在分析数据...'}, ensure_ascii=False)}\n\n"
-
-            try:
-                result = await asyncio.to_thread(analyze_with_llm, file_path, user_question)
-            except Exception as e:
-                logger.error(f"数据分析失败: {e}", exc_info=True)
-                yield f"data: {json.dumps({'content': f'数据分析失败: {e}'}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'done': True})}\n\n"
-                return
-
-            # 发送文本答案 (按段落拆分, 避免截断markdown)
+        async def _stream_data_result(result: dict, route_label: str):
+            """统一的 SSE 数据结果输出 — 复用于快速通道和兜底路径"""
             answer_text = result.get("answer", "")
+            # 按段落拆分发送 (避免截断 markdown 表格/代码块)
             paragraphs = answer_text.split('\n')
             current = ""
             for para in paragraphs:
@@ -173,65 +153,106 @@ async def chat_stream(req: ChatRequest):
             if current:
                 yield f"data: {json.dumps({'content': current}, ensure_ascii=False)}\n\n"
 
-            # 发送结构化数据 (表格/图表/代码)
+            # 结构化数据 (表格/图表/代码) — 仅当有实质内容时发送
             code = result.get("code", "")
             r = result.get("result")
-            if r and r.get("type") != "error":
-                data_event = {"type": "data_result", "code": code}
-                if r["type"] == "dataframe":
-                    data_event["table"] = {"columns": r.get("columns", []), "rows": r.get("rows", []), "shape": r.get("shape", [0, 0])}
-                elif r["type"] == "scalar":
+            has_result = r and r.get("type") != "error" and r.get("type") is not None
+            has_chart = bool(result.get("chart"))
+            if has_result or has_chart or code:
+                data_event = {"type": "data_result"}
+                if code:
+                    data_event["code"] = code
+                if r and r.get("type") == "dataframe":
+                    data_event["table"] = {
+                        "columns": r.get("columns", []),
+                        "rows": r.get("rows", []),
+                        "shape": r.get("shape", [0, 0]),
+                    }
+                elif r and r.get("type") == "scalar":
                     data_event["scalar"] = r.get("value")
-                elif r["type"] == "series":
+                elif r and r.get("type") == "series":
                     data_event["scalar"] = json.dumps(r.get("data", {}), ensure_ascii=False)
-                if result.get("chart"):
+                if has_chart:
                     data_event["chart"] = result["chart"]
                 yield f"data: {json.dumps(data_event, ensure_ascii=False)}\n\n"
 
             yield f"data: {json.dumps({'done': True})}\n\n"
 
-            # 保存对话记录
             await memory.add_message(req.session_id, req.user_id, "user", req.message)
             await memory.add_message(req.session_id, req.user_id, "assistant", answer_text)
 
             from app.api.analytics import track_event
-            track_event("chat_end", req.user_id, req.session_id, {"has_answer": True, "route": "data_fast"})
-            return
+            track_event("chat_end", req.user_id, req.session_id, {"has_answer": True, "route": route_label})
 
-        # ====== 兜底: 数据问题但没上传文件 ======
-        import re as re2
-        if re2.search(r'(分析|统计|图表|报表|数据|趋势|汇总|对比)', req.message) and not file_match:
-            import os
-            demo = "data/documents/商品数据明细_豆包AI生成.xlsx"
-            if os.path.exists(demo):
-                logger.info(f"数据问题无文件, 使用示例: {demo}")
-                yield f"data: {json.dumps({'status': '未检测到上传文件，正在使用示例数据...'}, ensure_ascii=False)}\n\n"
-                # 走快速通道
-                import asyncio as aio2
-                from app.tools.data_conversation import analyze_with_llm
-                try:
-                    result = await aio2.to_thread(analyze_with_llm, demo, req.message)
-                    answer_text = result.get("answer", "")
-                    for i in range(0, len(answer_text), 200):
-                        yield f"data: {json.dumps({'content': answer_text[i:i+200]}, ensure_ascii=False)}\n\n"
-                    r = result.get("result")
-                    if r and r.get("type") != "error":
-                        de = {"type": "data_result", "code": result.get("code", "")}
-                        if r["type"] == "dataframe":
-                            de["table"] = {"columns": r["columns"], "rows": r["rows"], "shape": r.get("shape", [0,0])}
-                        if result.get("chart"):
-                            de["chart"] = result["chart"]
-                        yield f"data: {json.dumps(de, ensure_ascii=False)}\n\n"
-                    yield f"data: {json.dumps({'done': True})}\n\n"
-                    await memory.add_message(req.session_id, req.user_id, "user", req.message)
-                    await memory.add_message(req.session_id, req.user_id, "assistant", answer_text)
-                    return
-                except Exception as e:
-                    logger.error(f"示例数据分析失败: {e}")
+        # ====== 统一意图路由 ======
+        from app.agent.intent import (
+            classify_intent, Intent, IntentResult,
+            extract_file_path, has_data_question,
+        )
+
+        file_path = extract_file_path(req.message)
+        has_file = bool(file_path)
+        intent = classify_intent(req.message, has_file=has_file)
+
+        logger.info(
+            f"意图路由: {intent.primary.value} conf={intent.confidence} "
+            f"has_file={has_file} | {req.message[:60]}..."
+        )
+
+        # --- 数据对话通道: data_analysis / data_report ---
+        if intent.primary in (Intent.DATA_ANALYSIS, Intent.DATA_REPORT):
+            import asyncio
+            from app.tools.data_conversation import analyze_with_llm
+
+            # 确定文件路径
+            if file_path:
+                target_file = file_path
+                user_question = intent.reason  # 从消息中提取的问题部分
+                # 重新提取清理后的问题
+                import re as _re
+                user_question = _re.sub(
+                    r'\[已上传数据文件:\s*[^\]]+\]\s*', '', req.message
+                ).replace('用户问题:', '').strip()
+                route_label = "data_fast"
             else:
-                yield f"data: {json.dumps({'content': '请先上传 Excel/CSV 数据文件再提问。点击输入框左侧的 📊 按钮上传。'}, ensure_ascii=False)}\n\n"
+                # 无文件但有数据意图 → 使用示例数据
+                demo = "data/documents/商品数据明细_豆包AI生成.xlsx"
+                if os.path.exists(demo):
+                    target_file = demo
+                    user_question = req.message
+                    route_label = "data_fallback"
+                    yield f"data: {json.dumps({'status': '未检测到上传文件，正在使用示例数据...'}, ensure_ascii=False)}\n\n"
+                else:
+                    yield f"data: {json.dumps({'content': '请先上传 Excel/CSV 数据文件再提问。点击输入框左侧的 📊 按钮上传。'}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'done': True})}\n\n"
+                    return
+
+            logger.info(f"数据通道: file={target_file}, question={user_question[:80]}")
+            yield f"data: {json.dumps({'status': '正在分析数据...'}, ensure_ascii=False)}\n\n"
+
+            try:
+                result = await asyncio.to_thread(
+                    analyze_with_llm, target_file, user_question, req.with_chart
+                )
+            except Exception as e:
+                logger.error(f"数据分析失败: {e}", exc_info=True)
+                yield f"data: {json.dumps({'content': f'数据分析失败: {e}'}, ensure_ascii=False)}\n\n"
                 yield f"data: {json.dumps({'done': True})}\n\n"
                 return
+
+            async for chunk in _stream_data_result(result, route_label):
+                yield chunk
+
+            # 如果是 data_report 意图且有文件，额外提示可下载报告
+            if intent.primary == Intent.DATA_REPORT and file_path:
+                yield f"data: {json.dumps({'content': '\n\n---\n📥 需要下载 Word 报告？点击下方按钮或回复「生成报告」。'}, ensure_ascii=False)}\n\n"
+
+            return
+
+        # --- greeting → 标准 Agent 通道（自然闲聊）---
+        # --- knowledge_qa / oa_query / crm_query → Agent 通道 ---
+        # --- general_chat / multi_domain → Agent 通道 ---
+        # (所有非数据意图统一走 Agent，Agent 内部按工具描述自动选择)
 
         # ====== 标准通道: Agent 对话 ======
         history = memory.get_history(req.session_id, req.user_id)
@@ -318,7 +339,7 @@ async def chat_stream(req: ChatRequest):
 
         except Exception as e:
             logger.error(f"流式错误: {e}", exc_info=True)
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
 
         from app.api.analytics import track_event
         track_event("chat_end", req.user_id, req.session_id, {"has_answer": bool(full_answer)})
@@ -568,3 +589,47 @@ async def analyze_chat_image(
         "analysis": analysis_text,
         "answer": answer,
     }
+
+
+# ====== 报告下载 ======
+
+@router.get("/chat/report/generate")
+async def generate_and_download_report(
+    file_path: str = Query(..., description="数据文件路径"),
+    session_id: str = Query(default="default"),
+):
+    """
+    生成 Word 数据分析报告并返回下载。
+    使用方式: GET /api/chat/report/generate?file_path=data/documents/xxx.xlsx&session_id=xxx
+    """
+    import asyncio
+    from app.tools.data_conversation import generate_data_report
+    from app.tools.registry import validate_file_path
+    from fastapi.responses import FileResponse
+
+    # 安全校验
+    try:
+        safe_path = validate_file_path(file_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not os.path.exists(safe_path):
+        raise HTTPException(status_code=404, detail=f"文件不存在: {safe_path}")
+
+    # 在后台线程生成报告（同步IO操作）
+    try:
+        report_path = await asyncio.to_thread(generate_data_report, safe_path)
+    except Exception as e:
+        logger.error(f"报告生成失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"报告生成失败: {e}")
+
+    if not os.path.exists(report_path):
+        raise HTTPException(status_code=500, detail="报告生成后文件不存在")
+
+    filename = os.path.basename(report_path)
+    return FileResponse(
+        report_path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

@@ -1,9 +1,9 @@
 """规则引擎降级 — LLM 不可用时的预定义计划模板
 
-2026: 支持数据对话 — 从消息中提取文件路径并路由到 data_conversation
+2026: 复用 app.agent.intent 统一意图识别，避免重复维护关键词表
 """
 
-import re
+from app.agent.intent import classify_intent, Intent, extract_file_path
 
 PREDEFINED_PLANS = {
     "data_report": {
@@ -45,33 +45,29 @@ PREDEFINED_PLANS = {
     },
 }
 
-RULE_TABLE = [
-    # 数据对话: 检测已上传文件标记 → 优先使用 data_conversation
-    (r"\[已上传数据文件:\s*([^\]]+)\][\s\S]*?(?:分析|统计|查看|显示|计算|对比|画|图表|趋势|分布|汇总|排名|排序|筛选|过滤|最大|最小|平均|求和|多少|几个|哪个|什么|怎么|如何)",
-     "data_conversation"),
-    (r"分析.*生成.*报告|数据.*报告|报表|生成.*报告", "data_report"),
-    (r"分析.*数据|数据.*分析|统计|图表", "data_analysis"),
-    (r"审批|OA|请假|报销|出差", "oa_query"),
-    (r"客户|CRM|客户信息|客户列表", "crm_query"),
-    (r"知识|文档|制度|规定|手册|帮助|怎么|如何|什么", "knowledge_qa"),
-]
-
-
-def extract_file_path(user_input: str) -> str | None:
-    """从消息中提取已上传文件的路径"""
-    m = re.search(r"\[已上传数据文件:\s*([^\]]+)\]", user_input)
-    return m.group(1).strip() if m else None
+# 意图 → 计划 key 的映射
+INTENT_PLAN_MAP = {
+    Intent.DATA_ANALYSIS: "data_conversation",
+    Intent.DATA_REPORT: "data_report",
+    Intent.OA_QUERY: "oa_query",
+    Intent.CRM_QUERY: "crm_query",
+    Intent.KNOWLEDGE_QA: "knowledge_qa",
+    Intent.GENERAL_CHAT: "knowledge_qa",  # 兜底
+    Intent.GREETING: "knowledge_qa",      # 兜底
+    Intent.MULTI_DOMAIN: "data_report",   # 跨领域走报告模板
+}
 
 
 def rule_based_plan(user_input: str) -> dict:
-    """规则匹配计划，如果检测到文件路径则注入 tool_params"""
-    for pattern, plan_key in RULE_TABLE:
-        if re.search(pattern, user_input):
-            plan = dict(PREDEFINED_PLANS[plan_key])  # 浅拷贝
-            # 数据对话: 注入 file_path
-            if plan_key == "data_conversation":
-                fp = extract_file_path(user_input)
-                if fp and plan.get("tasks"):
-                    plan["tasks"][0]["tool_params"]["file_path"] = fp
-            return plan
-    return PREDEFINED_PLANS["knowledge_qa"]
+    """基于统一意图识别生成降级计划"""
+    intent = classify_intent(user_input)
+    plan_key = INTENT_PLAN_MAP.get(intent.primary, "knowledge_qa")
+    plan = dict(PREDEFINED_PLANS[plan_key])  # 浅拷贝
+
+    # 数据对话: 注入 file_path
+    if plan_key == "data_conversation":
+        fp = extract_file_path(user_input)
+        if fp and plan.get("tasks"):
+            plan["tasks"][0]["tool_params"]["file_path"] = fp
+
+    return plan

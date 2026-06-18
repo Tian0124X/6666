@@ -47,6 +47,9 @@ class TokenBucket:
 
 _token_bucket = TokenBucket(rate=30, burst=60)
 
+# 模型加载状态 (暴露给 /api/health)
+_model_load_status = {"bge": False, "reranker": False}
+
 
 # ====== 应用 ======
 
@@ -75,16 +78,18 @@ def _load_models():
         from app.rag.embedder import BGEEmbeddings
         embedder = BGEEmbeddings()
         _ = embedder.model  # 触发 SentenceTransformer 下载/加载
+        _model_load_status["bge"] = True
         logger.info(f"  BGE Embedding 就绪 ({embedder.dimension}维)")
     except Exception as e:
-        logger.warning(f"  BGE 加载失败: {e}")
+        logger.error(f"  BGE 加载失败: {e}")
 
     try:
         from app.rag.retriever import _get_reranker
         _get_reranker()
+        _model_load_status["reranker"] = True
         logger.info("  BGE Reranker 就绪")
     except Exception as e:
-        logger.warning(f"  Reranker 加载失败: {e}")
+        logger.error(f"  Reranker 加载失败: {e}")
 
 
 app = FastAPI(
@@ -117,6 +122,7 @@ async def rate_limit_middleware(request: Request, call_next):
         return await call_next(request)
     client_ip = request.client.host if request.client else "unknown"
     if not _token_bucket.consume(client_ip):
+        logger.warning(f"速率限制触发: {client_ip} {request.method} {path}")
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后重试")
     return await call_next(request)
 
@@ -159,7 +165,12 @@ async def root():
 
 @app.get("/api/health", tags=["系统"])
 async def health_check():
-    return {"status": "ok", "version": "1.0.0", "llm_model": settings.LLM_MODEL}
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "llm_model": settings.LLM_MODEL,
+        "models": _model_load_status,
+    }
 
 
 @app.get("/api/info", tags=["系统"])

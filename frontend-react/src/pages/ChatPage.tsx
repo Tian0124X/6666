@@ -31,14 +31,15 @@ export default function ChatPage() {
   // 轮询人类审批 (10s间隔，已有弹窗时跳过)
   useEffect(() => {
     if (approval) return;  // 已有审批弹窗，停止轮询
+    let mounted = true;
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`/api/chat/approvals/${userId}`);
         const data = await res.json();
-        if (data.pending) setApproval(data.approval);
+        if (mounted && data.pending) setApproval(data.approval);
       } catch { /* ignore */ }
     }, 10_000);  // 10s (之前3s太频繁)
-    return () => clearInterval(interval);
+    return () => { mounted = false; clearInterval(interval); };
   }, [userId, approval]);
 
   const handleRate = async (score: number) => {
@@ -53,8 +54,14 @@ export default function ChatPage() {
   };
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages]);
+    const el = scrollRef.current;
+    if (!el) return;
+    // 仅当用户在底部附近 (< 200px) 或正在流式传输时才自动滚动
+    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+    if (isStreaming || isNearBottom) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    }
+  }, [messages, isStreaming]);
 
   const handleSend = useCallback(
     (text: string) => {
@@ -71,12 +78,13 @@ export default function ChatPage() {
         role: "assistant",
         content: "",
         isStreaming: true,
+        dataFilePath: dataFilePath || undefined,
       };
       addMessage(assistantMsg);
       setStreaming(true);
 
       const ctrl = streamChat(
-        { message: sendText, user_id: userId },
+        { message: sendText, user_id: userId, with_chart: true },
         (chunk) => updateLastAssistant(chunk),
         () => {
           setStreaming(false);

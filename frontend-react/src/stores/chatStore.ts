@@ -1,14 +1,24 @@
 import { create } from "zustand";
 
+export interface ChartConfig {
+  type: "bar" | "line" | "pie" | "scatter";
+  x: string;
+  y: string;
+  title: string;
+  data?: Record<string, unknown>[];
+}
+
 export interface DataResult {
-  type: "dataframe" | "series" | "scalar" | "chart";
+  type?: "dataframe" | "series" | "scalar";
   columns?: string[];
   rows?: unknown[][];
   shape?: number[];
   value?: unknown;
   data?: Record<string, unknown>;
   name?: string;
-  chart?: { type: string; x: string; y: string; title: string; data?: Record<string, unknown>[] };
+  chart?: ChartConfig;
+  report_path?: string;
+  report_available?: boolean;
 }
 
 export interface ChatMessage {
@@ -21,6 +31,7 @@ export interface ChatMessage {
   agents?: string[];
   code?: string;
   dataResult?: DataResult;
+  dataFilePath?: string;  // current data file path for report download
 }
 
 interface ChatStore {
@@ -40,7 +51,7 @@ export const useChatStore = create<ChatStore>((set) => ({
   sessionId: "default",
   addMessage: (msg) =>
     set((s) => ({
-      messages: [...s.messages, { ...msg, id: crypto.randomUUID() }],
+      messages: [...s.messages.slice(-99), { ...msg, id: crypto.randomUUID() }],
     })),
   updateLastAssistant: (content) =>
     set((s) => {

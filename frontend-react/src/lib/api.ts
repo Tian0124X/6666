@@ -4,26 +4,38 @@ const BASE = "/api";
 
 async function request<T>(
   url: string,
-  options?: RequestInit
+  options?: RequestInit & { timeout?: number }
 ): Promise<T> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...authHeader(),
-  };
-  const res = await fetch(`${BASE}${url}`, {
-    headers,
-    ...options,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || `HTTP ${res.status}`);
+  const { timeout = 30_000, ...fetchOptions } = options || {};
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...authHeader(),
+    };
+    const res = await fetch(`${BASE}${url}`, {
+      headers,
+      ...fetchOptions,
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("请求超时，请重试");
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return res.json();
 }
 
 /** SSE 流式请求 — 用于对话流式输出 */
 export function streamChat(
-  body: { message: string; session_id?: string; user_id?: string },
+  body: { message: string; session_id?: string; user_id?: string; with_chart?: boolean },
   onChunk: (text: string) => void,
   onDone: () => void,
   onError: (err: string) => void,
@@ -70,6 +82,20 @@ export function streamChat(
         }
       }
     }
+    // 处理 stream 结束后 buffer 中残留的数据
+    if (buffer.startsWith("data: ")) {
+      try {
+        const data = JSON.parse(buffer.slice(6));
+        if (data.content) onChunk(data.content);
+        if (data.done) onDone();
+        if (data.error) onError(data.error);
+        if (data.type === "data_result" && onData) {
+          onData({ code: data.code, table: data.table, chart: data.chart, scalar: data.scalar });
+        }
+      } catch { /* skip */ }
+    }
+    // 确保 onDone 始终被调用
+    onDone();
   }).catch((e) => {
     if (e.name !== "AbortError") onError(e.message);
   });

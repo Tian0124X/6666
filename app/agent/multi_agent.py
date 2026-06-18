@@ -188,6 +188,7 @@ async def _execute_agent_async(agent_name: str, task: str) -> str:
             HumanMessage(content=task),
         ]
         response = await llm_with_tools.ainvoke(messages)
+        messages.append(response)
 
         # 工具调用循环 (最多2轮)
         tool_calls = getattr(response, "tool_calls", [])
@@ -199,7 +200,6 @@ async def _execute_agent_async(agent_name: str, task: str) -> str:
                 if tool:
                     try:
                         result = await tool.ainvoke(tc.get("args", {}))
-                        messages.append(response)
                         messages.append(ToolMessage(
                             content=str(result),
                             tool_call_id=tc.get("id", ""),

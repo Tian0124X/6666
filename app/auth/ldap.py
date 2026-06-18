@@ -35,6 +35,7 @@ def ldap_authenticate(username: str, password: str) -> Optional[dict]:
 
     try:
         from ldap3 import Server, Connection, ALL, NTLM
+        from ldap3.utils.dn import escape_filter_chars
 
         # 构建用户 DN
         user_dn = _build_user_dn(username)
@@ -49,10 +50,11 @@ def ldap_authenticate(username: str, password: str) -> Optional[dict]:
             raise_exceptions=True,
         )
 
-        # 搜索用户属性
+        # 搜索用户属性 (转义防止 LDAP 注入)
+        safe_username = escape_filter_chars(username)
         conn.search(
             search_base=settings.LDAP_BASE_DN,
-            search_filter=f"(&(objectClass=person)(sAMAccountName={username}))",
+            search_filter=f"(&(objectClass=person)(sAMAccountName={safe_username}))",
             attributes=["displayName", "mail", "department", "cn"],
             size_limit=1,
         )
@@ -104,13 +106,16 @@ def ldap_search_user(username: str) -> Optional[dict]:
 
     try:
         from ldap3 import Server, Connection, ALL
+        from ldap3.utils.dn import escape_filter_chars
 
         server = Server(settings.LDAP_URL, get_info=ALL, connect_timeout=5)
         conn = Connection(server, auto_bind=True)
 
+        # 转义防止 LDAP 注入
+        safe_username = escape_filter_chars(username)
         conn.search(
             search_base=settings.LDAP_BASE_DN,
-            search_filter=f"(&(objectClass=person)(sAMAccountName={username}))",
+            search_filter=f"(&(objectClass=person)(sAMAccountName={safe_username}))",
             attributes=["displayName", "mail", "department", "cn"],
             size_limit=1,
         )

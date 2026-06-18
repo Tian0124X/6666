@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 # 内存回退: external_key → local_username
 _sso_map_memory: dict[str, dict] = {}
+_sso_table_checked = False
 
 
 def _build_external_key(provider: str, external_id: str) -> str:
@@ -32,7 +33,10 @@ def _get_mysql_session():
 
 
 def _ensure_sso_table(session) -> bool:
-    """确保 sso_user_map 表存在"""
+    """确保 sso_user_map 表存在（进程生命周期内只执行一次 DDL）"""
+    global _sso_table_checked
+    if _sso_table_checked:
+        return True
     try:
         from app.models.database import Base
         from sqlalchemy import Column, String, TIMESTAMP, func
@@ -55,6 +59,7 @@ def _ensure_sso_table(session) -> bool:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         """)
         session.commit()
+        _sso_table_checked = True
         return True
     except Exception as e:
         session.rollback()
