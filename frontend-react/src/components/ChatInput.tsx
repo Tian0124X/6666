@@ -15,6 +15,8 @@ interface Props {
 export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, disabled, dataFileName, onClearDataFile }: Props) {
   const [input, setInput] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatus, setUploadStatus] = useState<"" | "uploading" | "ready" | "indexing">("");
   const fileRef = useRef<HTMLInputElement>(null);
   const dataFileRef = useRef<HTMLInputElement>(null);
 
@@ -46,7 +48,6 @@ export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, di
     const file = e.target.files?.[0];
     if (!file || !onDataFile) return;
 
-    // 文件大小校验 (最大 50MB)
     const MAX_SIZE = 50 * 1024 * 1024;
     if (file.size > MAX_SIZE) {
       alert(`文件过大 (${(file.size / 1024 / 1024).toFixed(1)}MB)，最大支持 50MB`);
@@ -54,7 +55,6 @@ export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, di
       return;
     }
 
-    // 文件扩展名校验
     const allowedExts = [".xlsx", ".xls", ".csv"];
     const fileName = file.name.toLowerCase();
     if (!allowedExts.some((ext) => fileName.endsWith(ext))) {
@@ -64,13 +64,45 @@ export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, di
     }
 
     setUploading(true);
+    setUploadProgress(0);
+    setUploadStatus("uploading");
     try {
       const { knowledgeApi } = await import("../lib/api");
-      const res = await knowledgeApi.upload(file);
+      const res = await knowledgeApi.upload(file, (pct) => {
+        setUploadProgress(pct);
+      });
       const uploadedName = res.filename || file.name;
       const safeName = uploadedName.replace(/\.\./g, '').replace(/[\\/]/g, '');
+      setUploadProgress(100);
+      setUploadStatus("ready");
       onDataFile(`data/documents/${safeName}`, file.name);
-    } catch { /* ignore */ }
+
+      // 后台轮询索引状态
+      const pollIndex = async () => {
+        setUploadStatus("indexing");
+        for (let i = 0; i < 30; i++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          try {
+            const status = await knowledgeApi.uploadIndexStatus(uploadedName);
+            if (status.status === "done") {
+              setUploadStatus("ready");
+              return;
+            } else if (status.status === "error") {
+              console.warn("索引失败:", status.error);
+              setUploadStatus("ready");
+              return;
+            }
+          } catch {
+            setUploadStatus("ready");
+            return;
+          }
+        }
+        setUploadStatus("ready");
+      };
+      pollIndex();
+    } catch {
+      setUploadStatus("");
+    }
     setUploading(false);
     if (dataFileRef.current) dataFileRef.current.value = "";
   };
@@ -80,14 +112,33 @@ export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, di
       {/* Data file indicator */}
       {dataFileName && (
         <div className="max-w-4xl mx-auto mb-2 flex items-center gap-2 px-1">
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-primary/10 text-primary text-xs font-medium">
+          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium ${
+            uploadStatus === "indexing" ? "bg-amber-500/10 text-amber-600" : "bg-primary/10 text-primary"
+          }`}>
             <FileSpreadsheet className="w-3 h-3" />
             {dataFileName}
+            {uploadStatus === "indexing" && (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            )}
             <button onClick={onClearDataFile} className="ml-1 hover:bg-primary/20 rounded p-0.5">
               <X className="w-3 h-3" />
             </button>
           </span>
-          <span className="text-xs text-muted-foreground">已附加，可直接提问分析</span>
+          <span className="text-xs text-muted-foreground">
+            {uploadStatus === "indexing" ? "后台索引中，可直接提问..." : "已就绪，可直接提问分析"}
+          </span>
+        </div>
+      )}
+
+      {/* Upload progress bar */}
+      {uploading && uploadProgress > 0 && uploadProgress < 100 && (
+        <div className="max-w-4xl mx-auto mb-2 px-1">
+          <div className="flex items-center gap-2">
+            <div className="h-1.5 flex-1 bg-muted rounded-full overflow-hidden">
+              <div className="h-full bg-primary transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+            </div>
+            <span className="text-xs text-muted-foreground tabular-nums">{uploadProgress}%</span>
+          </div>
         </div>
       )}
       <div className="flex gap-3 max-w-4xl mx-auto">

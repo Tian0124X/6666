@@ -7,10 +7,12 @@
 import os
 import re
 import json
+import time
 import logging
 import traceback
 from typing import Optional, Any
-from pydantic import BaseModel, Field
+from functools import lru_cache
+from pydantic import BaseModel, Field, model_validator
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -126,11 +128,34 @@ def _execute_sandbox(code: str, df: pd.DataFrame) -> dict:
 
 class ChartConfig(BaseModel):
     """图表配置 — LLM 结构化输出的图表部分"""
-    type: str = Field(default="bar", description="图表类型: bar / line / pie")
+    type: str = Field(default="bar", description="图表类型: bar / line / pie / area / scatter / funnel / composed")
     x: str = Field(default="", description="X轴 / 分类列名")
     y: str = Field(default="", description="Y轴 / 数值列名")
+    x2: str = Field(default="", description="第二数值列(散点图专用)")
     title: str = Field(default="图表", description="图表标题")
     data: list[dict[str, Any]] = Field(default_factory=list, description="图表数据，最多20条")
+    series: list[dict[str, Any]] | None = Field(default=None, description="多系列数据(组合图)")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fix_list_y(cls, values: Any) -> Any:
+        """兼容 LLM 将 y 输出为列表的情况（多指标场景）"""
+        if not isinstance(values, dict):
+            return values
+        y = values.get("y")
+        if isinstance(y, list):
+            # y 是列表 → 取第一个作为 y，剩余生成 series
+            if y:
+                values["y"] = str(y[0])
+                if len(y) > 1 and not values.get("series"):
+                    values["series"] = [
+                        {"dataKey": str(col), "chartType": "bar" if i == 0 else "line"}
+                        for i, col in enumerate(y)
+                    ]
+                if values.get("type") not in ("composed",):
+                    if len(y) > 1:
+                        values["type"] = "composed"
+        return values
 
 
 class DataAnalysisOutput(BaseModel):
@@ -138,11 +163,12 @@ class DataAnalysisOutput(BaseModel):
     content: str = Field(description="markdown 格式的自然语言回答，这是用户看到的主要内容")
     code: str = Field(default="", description="可选的 pandas 代码，直接操作 df，最后一行是表达式")
     chart_config: ChartConfig | None = Field(default=None, description="可选图表配置，仅当图表能增强理解时输出")
+    suggested_questions: list[str] = Field(default_factory=list, description="推荐的后续分析问题(2-3个)")
 
 
 # ====== LLM 系统提示 ======
 
-DATA_CHAT_SYSTEM = """你是企业智能办公助手的数据分析模块。用户上传了数据文件，已加载为 df 变量。
+DATA_CHAT_SYSTEM = """你是一位资深企业数据分析师。用户上传了数据文件，已加载为 df 变量。
 
 ## 数据概况
 {df_info}
@@ -156,37 +182,49 @@ DATA_CHAT_SYSTEM = """你是企业智能办公助手的数据分析模块。用�
 - 用户问具体问题 → 精准回答 + 数据支撑
 - 用户说"生成报告" → 标记需要报告输出
 
-### 2. 对话自然
-像人类数据分析师一样回答——先给结论和洞察，再附细节。不要套固定模板。
+### 2. 对话自然 — 像人类数据分析师
+- 先给结论和洞察，再附细节
+- 主动发现数据中的异常值、趋势拐点、分布特征
+- 给出业务建议和可行操作方向，而不仅仅是呈现数据
+- **重要：content 中不要写 markdown 表格**（表格数据会由系统自动渲染在下方）
 
-**重要：content 中不要写 markdown 表格**（表格数据会由系统自动渲染在下方）。用自然语言描述关键数字即可，如\"运动户外品类以100万元领先，其次是母婴用品85万元\"。
-
-### 3. 按需输出
-根据用户问题灵活决定输出内容：
+### 3. 按需输出 — 根据用户问题灵活决定
 - 概览型问题（"数据怎么样""有几列"）→ 纯文字回答，不需要代码和图表
-- 排名/对比问题（"最高""最低""Top10"）→ 文字结论 + 表格 + 可选柱状图
-- 占比/分布问题（"占比""分布""构成"）→ 文字结论 + 可选饼图
-- 趋势问题（"趋势""变化""增长"）→ 文字结论 + 可选折线图
+- 排名/对比问题（"最高""最低""Top10"）→ 文字结论 + 表格 + 柱状图
+- 占比/分布问题（"占比""分布""构成"）→ 文字结论 + 饼图/面积图
+- 趋势问题（"趋势""变化""增长"）→ 文字结论 + 折线图/面积图
+- 相关性问题（"关系""关联""影响"）→ 文字结论 + 散点图
+- 漏斗/转化问题（"转化率""漏斗""流程"）→ 文字结论 + 漏斗图
+- 多维度问题（"同时看""对比趋势"）→ 文字结论 + 组合图
 - 纯计算问题（"平均""总和"）→ 文字结论即可，不需要图表
 
 ### 4. 图表智能选择（仅在"一图胜千言"时输出 chart_config）
-- 时间序列数据（日期/月份列）→ type: "line"（折线图）
-- 分类对比（类别≤6个）→ type: "pie"（饼图，展示占比）
-- 分类对比（类别7~20个）→ type: "bar"（柱状图）
+可选类型: bar(柱状图) / line(折线图) / pie(饼图) / area(面积图) / scatter(散点图) / funnel(漏斗图) / composed(组合图)
+- 时间序列 + 累计值 → type: "area"（面积图，展示趋势填充效果更佳）
+- 纯时间序列趋势 → type: "line"（折线图）
+- 分类占比(≤6个) → type: "pie"（饼图）
+- 分类对比(7~20个) → type: "bar"（柱状图）
+- 两个数值列相关性 → type: "scatter"（散点图），设置 x2 为第二列
+- 有序递减序列 → type: "funnel"（漏斗图）
+- 同时展示数值+趋势 → type: "composed"（组合图=柱+线），提供 series 字段
 - 类别>20个 → 取Top10做柱状图
 - 纯统计数字 → 不需要图表
 
 ### 5. 代码原则
 - 直接操作 df 变量，禁止 import / read_excel / read_csv / open / print()
 - 最后一行是表达式（其值会被自动捕获为结果）
-- **查询 Top N 时使用 head(10) 或 nlargest(10)，不要只取 head(3)**，确保图表有足够数据点
+- **查询 Top N 时使用 head(10) 或 nlargest(10)，不要只取 head(3)**
 - 如果不需要计算就不要写 code（设为空字符串）
+
+### 6. 后续建议
+回答末尾通过 suggested_questions 推荐 2-3 个后续分析方向，引导用户深入探索数据。
 
 ## 输出 JSON 格式
 {{
-  "content": "markdown 格式的自然语言回答（这是主要输出，用户看到的内容）",
+  "content": "markdown 格式的自然语言回答（主要输出）",
   "code": "可选的 pandas 代码（不需要时为空字符串）",
-  "chart_config": {{"type":"bar|line|pie","x":"列名","y":"列名","title":"标题","data":[{{...}}]}} 或 null
+  "chart_config": {{"type":"bar|line|pie|area|scatter|funnel|composed","x":"列名","y":"列名","title":"标题","data":[{{...}}]}} 或 null,
+  "suggested_questions": ["后续分析建议1", "后续分析建议2"]
 }}
 
 注意: chart_config 和 code 仅在必要时输出。不需要就设为 null / ""。
@@ -266,6 +304,150 @@ def _is_datetime_column(series: pd.Series) -> bool:
     return False
 
 
+# ====== DataFrame 缓存 — 消除重复加载 ======
+
+_dataframe_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+_CACHE_MAX_SIZE = 8
+
+
+def _get_dataframe(file_path: str) -> pd.DataFrame:
+    """
+    带缓存的 DataFrame 加载。
+    按文件路径+修改时间做 key，避免每次对话都重新读取文件。
+    缓存上限 8 个文件，LRU 淘汰。
+    """
+    mtime = os.path.getmtime(file_path)
+    cached = _dataframe_cache.get(file_path)
+    if cached and cached[0] == mtime:
+        logger.debug(f"DataFrame 缓存命中: {file_path}")
+        return cached[1].copy()
+
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in (".xlsx", ".xls"):
+        df = pd.read_excel(file_path)
+        unnamed_count = sum(1 for c in df.columns if 'Unnamed' in str(c))
+        if unnamed_count > len(df.columns) * 0.5:
+            logger.info(f"检测到标题行，使用 header=1 ({unnamed_count}/{len(df.columns)} Unnamed)")
+            df = pd.read_excel(file_path, header=1)
+        df.columns = [str(c).strip() for c in df.columns]
+        df = df.dropna(axis=1, how='all')
+    elif ext == ".csv":
+        for enc in ["utf-8", "gbk", "gb2312", "latin-1", "utf-16"]:
+            try:
+                df = pd.read_csv(file_path, encoding=enc)
+                break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        else:
+            raise ValueError("无法识别 CSV 编码")
+    else:
+        raise ValueError(f"不支持的文件格式: {ext}")
+
+    # LRU 淘汰
+    if len(_dataframe_cache) >= _CACHE_MAX_SIZE:
+        oldest = sorted(_dataframe_cache.items(), key=lambda x: x[1][0])
+        for k, _ in oldest[:len(oldest) // 2]:
+            del _dataframe_cache[k]
+
+    _dataframe_cache[file_path] = (mtime, df)
+    logger.info(f"DataFrame 已加载并缓存: {file_path} ({len(df)}x{len(df.columns)})")
+    return df.copy()
+
+
+# ====== 数据洞察引擎 ======
+
+def _generate_data_insights(df: pd.DataFrame, result: dict | None = None) -> dict:
+    """
+    自动数据洞察引擎。
+    生成数据摘要、异常值检测、相关性分析、分布特征。
+    """
+    insights: dict[str, Any] = {
+        "summary": "",
+        "anomalies": [],
+        "correlations": [],
+        "suggestions": [],
+    }
+
+    n_rows, n_cols = len(df), len(df.columns)
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    total_missing = int(df.isna().sum().sum())
+
+    # 1. 数据摘要
+    summary_parts = [f"数据集包含 {n_rows} 行 x {n_cols} 列"]
+    if numeric_cols:
+        summary_parts.append(f"{len(numeric_cols)} 个数值列")
+    if cat_cols:
+        summary_parts.append(f"{len(cat_cols)} 个分类列")
+    if total_missing > 0:
+        missing_pct = total_missing / (n_rows * n_cols) * 100
+        summary_parts.append(f"缺失值 {total_missing} 个 ({missing_pct:.1f}%)")
+    else:
+        summary_parts.append("无缺失值")
+    insights["summary"] = "，".join(summary_parts) + "。"
+
+    # 2. 异常值检测 (IQR 方法，最多检查 5 个数值列)
+    for col in numeric_cols[:5]:
+        q1 = df[col].quantile(0.25)
+        q3 = df[col].quantile(0.75)
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+        n_outliers = int(((df[col] < lower) | (df[col] > upper)).sum())
+        if n_outliers > 0:
+            pct = n_outliers / n_rows * 100
+            insights["anomalies"].append({
+                "column": col,
+                "count": n_outliers,
+                "percentage": round(pct, 1),
+                "range": f"[{lower:.2f}, {upper:.2f}]",
+            })
+
+    # 3. 相关性分析 (数值列间，最多 6 列)
+    if len(numeric_cols) >= 2:
+        corr_cols = numeric_cols[:6]
+        corr_matrix = df[corr_cols].corr()
+        for i in range(len(corr_cols)):
+            for j in range(i + 1, len(corr_cols)):
+                r = corr_matrix.iloc[i, j]
+                if abs(r) > 0.7 and not pd.isna(r):
+                    direction = "正相关" if r > 0 else "负相关"
+                    strength = "强" if abs(r) > 0.85 else "较强"
+                    insights["correlations"].append({
+                        "col_a": corr_cols[i],
+                        "col_b": corr_cols[j],
+                        "value": round(float(r), 3),
+                        "description": f"{corr_cols[i]} 与 {corr_cols[j]} {strength}{direction}(r={r:.2f})",
+                    })
+
+    # 4. 分布特征 (前 3 个数值列)
+    for col in numeric_cols[:3]:
+        skew = df[col].skew()
+        if abs(skew) > 1:
+            direction = "右偏" if skew > 0 else "左偏"
+            insights["anomalies"].append({
+                "column": col,
+                "count": 0,
+                "percentage": 0,
+                "range": "",
+                "description": f"{col} 分布明显{direction}(偏度={skew:.2f})",
+            })
+
+    # 5. 分析建议
+    suggestions = []
+    if len(cat_cols) > 0 and len(numeric_cols) > 0:
+        suggestions.append(f"尝试按 {cat_cols[0]} 分组分析 {numeric_cols[0]}")
+    if len(numeric_cols) >= 2:
+        suggestions.append(f"探索 {numeric_cols[0]} 和 {numeric_cols[1]} 的关系")
+    if any(_is_datetime_column(df[c]) for c in df.columns if c in df.columns):
+        suggestions.append("按时间维度分析趋势变化")
+    if insights["anomalies"]:
+        suggestions.append("深入调查检测到的异常值")
+    insights["suggestions"] = suggestions[:3]
+
+    return insights
+
+
 def _smart_chart_type(
     df: pd.DataFrame,
     result: dict,
@@ -276,11 +458,15 @@ def _smart_chart_type(
     返回图表配置 dict 或 None（不需要图表）。
 
     判断逻辑:
-    1. 时间序列 → line
-    2. 低基数分类(≤6) → pie
-    3. 中基数分类(7-20) → bar
-    4. 高基数(>20) → bar (Top10)
-    5. 纯标量结果 → None (不需要图表)
+    1. 时间序列 + 累计值 → area
+    2. 时间序列 → line
+    3. 低基数分类(≤6) → pie
+    4. 中基数分类(7-20) → bar
+    5. 高基数(>20) → bar (Top10)
+    6. 两数值列相关性 → scatter
+    7. 有序递减序列 → funnel
+    8. 多指标对比 → composed
+    9. 纯标量结果 → None (不需要图表)
     """
     # 标量结果 → 不需要图表
     if result.get("type") == "scalar":
@@ -298,32 +484,83 @@ def _smart_chart_type(
         y_col = numeric_cols[0]
         n_categories = len(df_result)
 
-        # 1. 时间序列检测
-        if x_col in df.columns and _is_datetime_column(df[x_col]):
-            chart_type = "line"
-            title = f"{y_col} 变化趋势"
-        # 2. 低基数 → 饼图
-        elif n_categories <= 6:
-            chart_type = "pie"
-            title = f"{y_col} 按{x_col}分布"
-        # 3. 中基数 → 柱状图
-        elif n_categories <= 20:
-            chart_type = "bar"
-            title = f"{y_col} 按{x_col}排名"
-        # 4. 高基数 → 柱状图 (Top10已在execute中截断)
-        else:
-            chart_type = "bar"
-            title = f"Top {n_categories} {x_col} {y_col}对比"
+        chart_data = [
+            dict(zip(df_result.columns.tolist(), row))
+            for row in result["rows"][:20]
+        ]
 
+        # 1. 时间序列 + 累计值 → area 面积图
+        if x_col in df.columns and _is_datetime_column(df[x_col]):
+            # 检测是否为累计值(单调递增)
+            vals = df_result[y_col].values
+            is_cumulative = len(vals) >= 3 and all(
+                vals[i] >= vals[i-1] * 0.9 for i in range(1, len(vals))
+            )
+            if is_cumulative:
+                return {
+                    "type": "area",
+                    "x": x_col, "y": y_col,
+                    "title": f"{y_col} 累计趋势",
+                    "data": chart_data,
+                }
+            # 普通时间序列 → line
+            return {
+                "type": "line",
+                "x": x_col, "y": y_col,
+                "title": f"{y_col} 变化趋势",
+                "data": chart_data,
+            }
+
+        # 2. 多数值列 → composed 组合图 (柱+线)
+        if len(numeric_cols) >= 3 and n_categories <= 12:
+            return {
+                "type": "composed",
+                "x": x_col, "y": y_col,
+                "title": f"{y_col} 与 {numeric_cols[1]} 对比",
+                "data": chart_data,
+                "series": [
+                    {"dataKey": y_col, "chartType": "bar"},
+                    {"dataKey": numeric_cols[1], "chartType": "line"},
+                ],
+            }
+
+        # 3. 有序递减序列 → funnel 漏斗图
+        if n_categories >= 3 and n_categories <= 8:
+            vals = df_result[y_col].values
+            is_decreasing = all(vals[i] >= vals[i+1] * 0.8 for i in range(len(vals)-1))
+            if is_decreasing:
+                return {
+                    "type": "funnel",
+                    "x": x_col, "y": y_col,
+                    "title": f"{y_col} 漏斗分析",
+                    "data": chart_data,
+                }
+
+        # 4. 低基数 → 饼图
+        if n_categories <= 6:
+            return {
+                "type": "pie", "x": x_col, "y": y_col,
+                "title": f"{y_col} 按{x_col}分布",
+                "data": chart_data,
+            }
+
+        # 5. 两数值列 → scatter 散点图
+        if len(numeric_cols) >= 2:
+            q_lower = r"(关系|关联|相关|影响|scatter|散点)"
+            if re.search(q_lower, user_question, re.IGNORECASE):
+                return {
+                    "type": "scatter",
+                    "x": numeric_cols[0], "y": numeric_cols[1],
+                    "x2": numeric_cols[1],
+                    "title": f"{numeric_cols[0]} vs {numeric_cols[1]}",
+                    "data": chart_data,
+                }
+
+        # 6. 中/高基数 → 柱状图
         return {
-            "type": chart_type,
-            "x": x_col,
-            "y": y_col,
-            "title": title,
-            "data": [
-                dict(zip(df_result.columns.tolist(), row))
-                for row in result["rows"][:20]
-            ],
+            "type": "bar", "x": x_col, "y": y_col,
+            "title": f"{y_col} 按{x_col}排名",
+            "data": chart_data,
         }
 
     if result.get("type") == "series":
@@ -333,7 +570,7 @@ def _smart_chart_type(
             n_cat = len(data)
             keys = list(data.keys())
 
-            # 检测 key 是否为日期 → 折线图
+            # 检测 key 是否为日期
             is_date_keys = False
             try:
                 pd.to_datetime(pd.Series(keys[:10]), format='mixed', dayfirst=False)
@@ -341,26 +578,33 @@ def _smart_chart_type(
             except (ValueError, TypeError):
                 pass
 
-            if is_date_keys and n_cat >= 3:
-                chart_type = "line"
-                title = f"{series_name} 变化趋势"
-            elif n_cat <= 6:
-                chart_type = "pie"
-                title = f"{series_name} 分布"
-            else:
-                chart_type = "bar"
-                title = f"{series_name} 排名 (Top 20)"
+            series_data = [
+                {"类别": str(k), series_name: v}
+                for k, v in list(data.items())[:20]
+            ]
 
-            return {
-                "type": chart_type,
-                "x": "类别",
-                "y": series_name,
-                "title": title,
-                "data": [
-                    {"类别": str(k), series_name: v}
-                    for k, v in list(data.items())[:20]
-                ],
-            }
+            if is_date_keys and n_cat >= 3:
+                # 时间序列: 检查是否累计
+                vals = list(data.values())[:20]
+                is_cumulative = all(vals[i] >= vals[i-1] * 0.9 for i in range(1, len(vals)))
+                chart_type = "area" if is_cumulative else "line"
+                title = f"{series_name} 累计趋势" if is_cumulative else f"{series_name} 变化趋势"
+                return {
+                    "type": chart_type, "x": "类别", "y": series_name,
+                    "title": title, "data": series_data,
+                }
+            elif n_cat <= 6:
+                return {
+                    "type": "pie", "x": "类别", "y": series_name,
+                    "title": f"{series_name} 分布",
+                    "data": series_data,
+                }
+            else:
+                return {
+                    "type": "bar", "x": "类别", "y": series_name,
+                    "title": f"{series_name} 排名 (Top 20)",
+                    "data": series_data,
+                }
 
     return None
 
@@ -382,32 +626,13 @@ def analyze_with_llm(file_path: str, question: str, with_chart: bool = True) -> 
     Returns:
         {"answer": str, "code": str, "result": dict, "chart": dict|null}
     """
-    # 1. 加载数据
+    # 1. 加载数据 (带缓存)
     safe_path = validate_file_path(file_path)
     if not os.path.exists(safe_path):
         return {"answer": f"文件不存在: {safe_path}", "code": "", "result": None, "chart": None}
 
-    ext = os.path.splitext(safe_path)[1].lower()
     try:
-        if ext in (".xlsx", ".xls"):
-            df = pd.read_excel(safe_path)
-            unnamed_count = sum(1 for c in df.columns if 'Unnamed' in str(c))
-            if unnamed_count > len(df.columns) * 0.5:
-                logger.info(f"检测到标题行，使用 header=1 ({unnamed_count}/{len(df.columns)} Unnamed)")
-                df = pd.read_excel(safe_path, header=1)
-            df.columns = [str(c).strip() for c in df.columns]
-            df = df.dropna(axis=1, how='all')
-        elif ext == ".csv":
-            for enc in ["utf-8", "gbk", "gb2312", "latin-1", "utf-16"]:
-                try:
-                    df = pd.read_csv(safe_path, encoding=enc)
-                    break
-                except (UnicodeDecodeError, UnicodeError):
-                    continue
-            else:
-                return {"answer": "无法识别 CSV 编码", "code": "", "result": None, "chart": None}
-        else:
-            return {"answer": f"不支持的文件格式: {ext}", "code": "", "result": None, "chart": None}
+        df = _get_dataframe(safe_path)
     except Exception as e:
         return {"answer": f"文件读取失败: {e}", "code": "", "result": None, "chart": None}
 
@@ -432,7 +657,25 @@ def analyze_with_llm(file_path: str, question: str, with_chart: bool = True) -> 
         response = DataAnalysisOutput(**parsed)
     except Exception as e:
         logger.error(f"LLM 结构化输出失败: {e}")
-        return {"answer": f"LLM 调用失败: {e}", "code": "", "result": None, "chart": None}
+        # 兜底：尝试修复常见的 y 为 list 问题后重试一次
+        try:
+            parsed_fixed = _extract_json(text)
+            cc = parsed_fixed.get("chart_config") or {}
+            if isinstance(cc.get("y"), list):
+                y_list = cc["y"]
+                cc["y"] = str(y_list[0]) if y_list else ""
+                if len(y_list) > 1 and not cc.get("series"):
+                    cc["series"] = [
+                        {"dataKey": str(c), "chartType": "bar" if i == 0 else "line"}
+                        for i, c in enumerate(y_list)
+                    ]
+                cc["type"] = "composed"
+                parsed_fixed["chart_config"] = cc
+            response = DataAnalysisOutput(**parsed_fixed)
+            logger.info("LLM 输出修复成功（y 为 list → composed）")
+        except Exception as e2:
+            logger.error(f"修复后仍然失败: {e2}")
+            return {"answer": f"LLM 调用失败: {e}", "code": "", "result": None, "chart": None}
 
     # 4. 执行代码
     answer = response.content
@@ -478,7 +721,7 @@ def analyze_with_llm(file_path: str, question: str, with_chart: bool = True) -> 
     # 6. 图表
     chart = None
     if with_chart:
-        # 优先从实际执行结果生成图表数据（而非 LLM 猜测的 sample data）
+        # 优先从实际执行结果生成图表数据
         if result and result.get("type") != "error":
             chart = _smart_chart_type(df, result, question)
         # LLM 给的 chart_config 中有类型/坐标轴偏好，覆盖智能推断
@@ -489,17 +732,32 @@ def analyze_with_llm(file_path: str, question: str, with_chart: bool = True) -> 
                 chart["x"] = response.chart_config.x
             if response.chart_config.y:
                 chart["y"] = response.chart_config.y
+            if response.chart_config.x2:
+                chart["x2"] = response.chart_config.x2
             if response.chart_config.title and response.chart_config.title != "图表":
                 chart["title"] = response.chart_config.title
+            if response.chart_config.series:
+                chart["series"] = response.chart_config.series
         elif not chart and response.chart_config and response.chart_config.data:
-            # 无执行结果但 LLM 给了 chart → 用 LLM 的数据（兜底）
             chart = response.chart_config.model_dump()
+
+    # 7. 数据洞察
+    insights = None
+    try:
+        insights = _generate_data_insights(df, result)
+    except Exception as e:
+        logger.debug(f"数据洞察生成失败: {e}")
+
+    # 8. 后续建议
+    suggested = getattr(response, 'suggested_questions', []) or []
 
     return {
         "answer": answer,
         "code": code,
         "result": result,
         "chart": chart,
+        "insights": insights,
+        "suggested_questions": suggested,
     }
 
 
@@ -723,5 +981,12 @@ class DataConversationTool(BaseTool):
             elif len(val_str) > 500:
                 val_str = val_str[:500] + "..."
             answer += f"\n\n**结果:** {val_str}"
+
+        # 附加后续建议
+        suggested = result.get("suggested_questions", [])
+        if suggested:
+            answer += "\n\n💡 **推荐后续分析:**\n"
+            for sq in suggested[:3]:
+                answer += f"- {sq}\n"
 
         return answer

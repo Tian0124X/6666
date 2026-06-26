@@ -39,7 +39,14 @@ export function streamChat(
   onChunk: (text: string) => void,
   onDone: () => void,
   onError: (err: string) => void,
-  onData?: (data: { code?: string; table?: { columns: string[]; rows: unknown[][]; shape: number[] }; chart?: Record<string, unknown>; scalar?: unknown }) => void
+  onData?: (data: {
+    code?: string;
+    table?: { columns: string[]; rows: unknown[][]; shape: number[] };
+    chart?: Record<string, unknown>;
+    scalar?: unknown;
+    insights?: Record<string, unknown>;
+    suggested_questions?: string[];
+  }) => void
 ): AbortController {
   const controller = new AbortController();
 
@@ -76,6 +83,8 @@ export function streamChat(
                 table: data.table,
                 chart: data.chart,
                 scalar: data.scalar,
+                insights: data.insights,
+                suggested_questions: data.suggested_questions,
               });
             }
             if (data.done && !hadError) onDone();
@@ -90,7 +99,7 @@ export function streamChat(
         if (data.content) onChunk(data.content);
         if (data.error) { hadError = true; onError(data.error); }
         if (data.type === "data_result" && onData) {
-          onData({ code: data.code, table: data.table, chart: data.chart, scalar: data.scalar });
+          onData({ code: data.code, table: data.table, chart: data.chart, scalar: data.scalar, insights: data.insights, suggested_questions: data.suggested_questions });
         }
         if (data.done && !hadError) onDone();
       } catch { /* skip */ }
@@ -154,9 +163,31 @@ export const knowledgeApi = {
     request<{ answer: string; sources: { filename: string; page: number | null; excerpt: string }[] }>(
       "/knowledge/qa/smart", { method: "POST", body: JSON.stringify({ question }) }
     ),
-  upload: async (file: File) => {
+  upload: async (file: File, onProgress?: (pct: number) => void) => {
     const fd = new FormData();
     fd.append("file", file);
+    // 大文件使用 XMLHttpRequest 获取真实进度
+    if (file.size > 10 * 1024 * 1024 && onProgress) {
+      return new Promise<Record<string, unknown>>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", `${BASE}/knowledge/upload`);
+        const authH = authHeader();
+        Object.entries(authH).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 90));
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            onProgress?.(100);
+            resolve(JSON.parse(xhr.responseText));
+          } else {
+            reject(new Error(`HTTP ${xhr.status}`));
+          }
+        };
+        xhr.onerror = () => reject(new Error("上传失败"));
+        xhr.send(fd);
+      });
+    }
     const res = await fetch(`${BASE}/knowledge/upload`, {
       method: "POST",
       headers: { ...authHeader() },
@@ -168,6 +199,10 @@ export const knowledgeApi = {
     }
     return res.json();
   },
+  uploadIndexStatus: (filename: string) =>
+    request<{ filename: string; status: string; chunks: number; error?: string }>(
+      `/knowledge/upload/status/${encodeURIComponent(filename)}`
+    ),
   listDocs: () => request<{ total: number; indexed_documents: string[]; uploaded_files: string[] }>(
     "/knowledge/documents"
   ),

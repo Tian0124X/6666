@@ -1,6 +1,8 @@
 """知识库 API — /api/knowledge/* — 接入完整 RAG 链路"""
 
 import os
+import asyncio
+import logging
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from app.models.request import KnowledgeQARequest
 from app.models.response import KnowledgeQAResponse, UploadResponse
@@ -10,7 +12,37 @@ from app.rag.store import add_documents, delete_by_source, get_unique_sources
 from app.rag.retriever import rag_qa
 from app.rag.advanced import smart_rag_qa
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# ====== 后台索引状态跟踪 ======
+
+_index_status: dict[str, dict] = {}  # filename -> {"status": "pending"|"indexing"|"done"|"error", "chunks": int, "error": str}
+
+
+async def _background_index(file_path: str, filename: str):
+    """后台异步索引任务：解析 → 分块 → 向量化"""
+    _index_status[filename] = {"status": "indexing", "chunks": 0, "error": ""}
+    try:
+        docs = await asyncio.to_thread(UniversalDocumentLoader.load, file_path)
+        if not docs:
+            _index_status[filename] = {"status": "error", "chunks": 0, "error": "文档解析后无内容"}
+            return
+
+        chunks = await asyncio.to_thread(split_documents, docs)
+        if not chunks:
+            _index_status[filename] = {"status": "error", "chunks": 0, "error": "文档分块后无内容"}
+            return
+
+        count = await asyncio.to_thread(add_documents, chunks)
+        from app.rag.retriever import _invalidate_bm25_cache
+        _invalidate_bm25_cache()
+
+        _index_status[filename] = {"status": "done", "chunks": count, "error": ""}
+        logger.info(f"后台索引完成: {filename} → {count} chunks")
+    except Exception as e:
+        _index_status[filename] = {"status": "error", "chunks": 0, "error": str(e)}
+        logger.error(f"后台索引失败: {filename}: {e}")
 
 
 @router.post("/qa", response_model=KnowledgeQAResponse, tags=["知识库"])
@@ -101,12 +133,18 @@ async def rebuild_index(directory: str = "data/documents"):
 
 @router.post("/upload", response_model=UploadResponse, tags=["知识库"])
 async def upload_document(file: UploadFile = File(...)):
-    """上传文档 → 解析 → 分块 → 入库（限制 50MB）"""
+    """
+    上传文档 — 快速保存 + 后台异步索引。
+    
+    优化流程:
+    1. 同步保存文件到磁盘 (<1s)
+    2. 触发后台异步索引 (不阻塞响应)
+    3. 通过 /api/knowledge/index/status 查询索引进度
+    """
     # 安全检查
     if not file.filename:
         raise HTTPException(status_code=400, detail="文件名不能为空")
 
-    # 文件名路径遍历防护
     safe_filename = os.path.basename(file.filename)
     if safe_filename != file.filename or ".." in safe_filename:
         raise HTTPException(status_code=400, detail=f"文件名包含非法字符: {file.filename}")
@@ -119,45 +157,38 @@ async def upload_document(file: UploadFile = File(...)):
             detail=f"不支持的文件类型: {ext}。支持: {allowed_exts}",
         )
 
-    # 保存上传文件（限制 50MB）
-    MAX_SIZE = 50 * 1024 * 1024  # 50MB
+    # 快速保存文件到磁盘
+    MAX_SIZE = 50 * 1024 * 1024
     upload_dir = os.path.abspath("data/documents")
     os.makedirs(upload_dir, exist_ok=True)
     file_path = os.path.join(upload_dir, safe_filename)
 
-    # 检查文件大小（先读一小部分判断）
     content = await file.read()
     if len(content) > MAX_SIZE:
         raise HTTPException(status_code=413, detail=f"文件过大: {len(content)} 字节 (上限 {MAX_SIZE} 字节)")
     with open(file_path, "wb") as f:
         f.write(content)
 
-    try:
-        # 加载 → 分块 → 入库
-        docs = UniversalDocumentLoader.load(file_path)
-        if not docs:
-            raise ValueError("文档解析后无内容，请检查文件是否为空")
+    # 触发后台异步索引
+    _index_status[safe_filename] = {"status": "pending", "chunks": 0, "error": ""}
+    asyncio.create_task(_background_index(file_path, safe_filename))
 
-        chunks = split_documents(docs)
-        if not chunks:
-            raise ValueError("文档分块后无内容")
+    logger.info(f"文件已保存，后台索引启动: {safe_filename} ({len(content)} bytes)")
+    return UploadResponse(
+        status="ok",
+        filename=safe_filename,
+        chunks=0,
+        message=f"✅ 文件已上传，正在后台索引中...",
+    )
 
-        count = add_documents(chunks)
-        # 新增文档后清除 BM25 缓存
-        from app.rag.retriever import _invalidate_bm25_cache
-        _invalidate_bm25_cache()
 
-        return UploadResponse(
-            status="ok",
-            filename=safe_filename,
-            chunks=count,
-            message=f"✅ 文档已成功入库：{count} 个文本块",
-        )
-    except Exception as e:
-        # 清理失败的文件
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(status_code=400, detail=f"文档处理失败: {str(e)}")
+@router.get("/upload/status/{filename}", tags=["知识库"])
+async def get_upload_index_status(filename: str):
+    """查询文件的后台索引进度"""
+    status = _index_status.get(filename)
+    if not status:
+        return {"filename": filename, "status": "unknown", "chunks": 0}
+    return {"filename": filename, **status}
 
 
 @router.post("/qa/smart", response_model=KnowledgeQAResponse, tags=["知识库"])

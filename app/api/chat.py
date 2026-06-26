@@ -158,12 +158,13 @@ async def chat_stream(req: ChatRequest, user: UserInfo = Depends(require_user)):
             if current:
                 yield f"data: {json.dumps({'content': current}, ensure_ascii=False)}\n\n"
 
-            # 结构化数据 (表格/图表/代码) — 仅当有实质内容时发送
+            # 结构化数据 (表格/图表/代码/洞察) — 仅当有实质内容时发送
             code = result.get("code", "")
             r = result.get("result")
             has_result = r and r.get("type") != "error" and r.get("type") is not None
             has_chart = bool(result.get("chart"))
-            if has_result or has_chart or code:
+            has_insights = bool(result.get("insights"))
+            if has_result or has_chart or code or has_insights:
                 data_event = {"type": "data_result"}
                 if code:
                     data_event["code"] = code
@@ -179,6 +180,11 @@ async def chat_stream(req: ChatRequest, user: UserInfo = Depends(require_user)):
                     data_event["scalar"] = json.dumps(r.get("data", {}), ensure_ascii=False)
                 if has_chart:
                     data_event["chart"] = result["chart"]
+                if has_insights:
+                    data_event["insights"] = result["insights"]
+                suggested = result.get("suggested_questions", [])
+                if suggested:
+                    data_event["suggested_questions"] = suggested
                 yield f"data: {json.dumps(data_event, ensure_ascii=False)}\n\n"
 
             yield f"data: {json.dumps({'done': True})}\n\n"

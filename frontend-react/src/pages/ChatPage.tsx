@@ -119,7 +119,7 @@ export default function ChatPage() {
           });
         },
         (data) => {
-          // 接收结构化数据 — 表格和图表可以同时存在
+          // 接收结构化数据 — 表格、图表、洞察、建议
           const dr: Record<string, unknown> = {};
           if (data.table) {
             dr.type = "dataframe";
@@ -133,6 +133,12 @@ export default function ChatPage() {
           if (data.scalar != null) {
             dr.type = dr.type || "scalar";
             dr.value = data.scalar;
+          }
+          if (data.insights) {
+            dr.insights = data.insights;
+          }
+          if (data.suggested_questions) {
+            dr.suggestedQuestions = data.suggested_questions;
           }
           const store = useChatStore.getState();
           const msgs = [...store.messages];
@@ -211,7 +217,7 @@ export default function ChatPage() {
         ) : (
           <div className="max-w-4xl mx-auto py-6 px-4 space-y-4">
             {messages.map((msg) => (
-              <ChatBubble key={msg.id} msg={msg} />
+              <ChatBubble key={msg.id} msg={msg} onSuggestionClick={handleSend} />
             ))}
             {showRating && !isStreaming && messages.length > 0 && (
               <div className="flex items-center gap-3 px-4 py-2 text-sm text-[var(--color-muted-foreground)]">

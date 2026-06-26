@@ -3,11 +3,20 @@ import { sessionsApi } from "../lib/api";
 import { authHeader } from "../stores/authStore";
 
 export interface ChartConfig {
-  type: "bar" | "line" | "pie" | "scatter";
+  type: "bar" | "line" | "pie" | "area" | "scatter" | "funnel" | "composed";
   x: string;
   y: string;
+  x2?: string;
   title: string;
   data?: Record<string, unknown>[];
+  series?: { dataKey: string; chartType: string }[];
+}
+
+export interface DataInsights {
+  summary?: string;
+  anomalies?: { column: string; count: number; percentage: number; range: string; description?: string }[];
+  correlations?: { col_a: string; col_b: string; value: number; description: string }[];
+  suggestions?: string[];
 }
 
 export interface DataResult {
@@ -21,6 +30,8 @@ export interface DataResult {
   chart?: ChartConfig;
   report_path?: string;
   report_available?: boolean;
+  insights?: DataInsights;
+  suggestedQuestions?: string[];
 }
 
 export interface ChatMessage {
