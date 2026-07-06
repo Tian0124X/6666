@@ -105,6 +105,8 @@ export default function ChatPage() {
             }
             return { messages: msgs, isStreaming: false };
           });
+          // 流结束后缓存到 localStorage (图表/表格/洞察不丢失)
+          useChatStore.getState().cacheCurrentSession();
         },
         (err) => {
           useChatStore.setState((s) => {
@@ -119,32 +121,45 @@ export default function ChatPage() {
           });
         },
         (data) => {
-          // 接收结构化数据 — 表格、图表、洞察、建议
-          const dr: Record<string, unknown> = {};
-          if (data.table) {
-            dr.type = "dataframe";
-            dr.columns = data.table.columns;
-            dr.rows = data.table.rows;
-            dr.shape = data.table.shape;
-          }
-          if (data.chart) {
-            dr.chart = data.chart;
-          }
-          if (data.scalar != null) {
-            dr.type = dr.type || "scalar";
-            dr.value = data.scalar;
-          }
-          if (data.insights) {
-            dr.insights = data.insights;
-          }
-          if (data.suggested_questions) {
-            dr.suggestedQuestions = data.suggested_questions;
-          }
+          // 接收结构化数据 — 表格、图表、洞察、建议、文件路径、报告URL、RAG结果
           const store = useChatStore.getState();
           const msgs = [...store.messages];
           for (let i = msgs.length - 1; i >= 0; i--) {
             if (msgs[i].role === "assistant") {
-              msgs[i] = { ...msgs[i], code: data.code, dataResult: Object.keys(dr).length > 0 ? dr as ChatMessage['dataResult'] : undefined };
+              // RAG 快速通道返回的来源数据
+              if (data.type === "knowledge_result") {
+                msgs[i] = {
+                  ...msgs[i],
+                  sources: (data.sources || []).map((s) => ({ filename: s.filename, excerpt: s.excerpt || "" })),
+                  knowledgeMode: data.mode,
+                  knowledgeLevel: data.level,
+                  fromCache: data.from_cache,
+                };
+                break;
+              }
+              // 数据分析结构化结果
+              const existing = msgs[i].dataResult || {} as Record<string, unknown>;
+              const dr: Record<string, unknown> = { ...existing };
+              if (data.table) {
+                dr.type = "dataframe";
+                dr.columns = data.table.columns;
+                dr.rows = data.table.rows;
+                dr.shape = data.table.shape;
+              }
+              if (data.chart) dr.chart = data.chart;
+              if (data.scalar != null) {
+                dr.type = dr.type || "scalar";
+                dr.value = data.scalar;
+              }
+              if (data.insights) dr.insights = data.insights;
+              if (data.suggested_questions) dr.suggestedQuestions = data.suggested_questions;
+              if (data.file_path) dr.filePath = data.file_path;
+              if (data.report_url) dr.reportUrl = data.report_url;
+              msgs[i] = {
+                ...msgs[i],
+                code: data.code || msgs[i].code,
+                dataResult: Object.keys(dr).length > 0 ? dr as ChatMessage['dataResult'] : undefined,
+              };
               break;
             }
           }

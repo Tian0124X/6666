@@ -26,6 +26,19 @@ function clearAuth() {
   localStorage.removeItem("auth_user");
 }
 
+/** 检查 JWT 是否过期 (解析 payload 的 exp 字段) */
+function isTokenExpired(token: string): boolean {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return true;
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+    if (!payload.exp) return false;  // 无过期时间则信任
+    return Date.now() >= payload.exp * 1000;
+  } catch {
+    return true;
+  }
+}
+
 interface AuthStore {
   user: User | null;
   token: string | null;
@@ -136,7 +149,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     const token = localStorage.getItem("auth_token");
     const refresh = localStorage.getItem("auth_refresh") || "";
     const user = localStorage.getItem("auth_user");
-    if (token && user) {
+    if (token && user && !isTokenExpired(token)) {
       try {
         set({ token, refreshToken: refresh, user: JSON.parse(user), isLoggedIn: true, isRestoring: false });
       } catch {
@@ -144,6 +157,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         set({ isRestoring: false });
       }
     } else {
+      // token 过期或不存在，清除并跳到登录页
+      if (token && isTokenExpired(token)) {
+        clearAuth();
+      }
       set({ isRestoring: false });
     }
   },

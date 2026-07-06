@@ -40,6 +40,10 @@ export function ChatBubble({ msg, onSuggestionClick }: { msg: ChatMessage; onSug
         {/* Assistant message: markdown + data */}
         {!isUser && (
           <div className="space-y-3">
+            {/* Direct mode hint */}
+            {msg.knowledgeMode === "direct" && (
+              <p className="text-[11px] text-sky-600 dark:text-sky-400 italic">💡 此问题无需检索知识库，直接回答</p>
+            )}
             {/* Text answer */}
             {msg.content && (
               <div className="prose prose-sm dark:prose-invert max-w-none">
@@ -98,10 +102,10 @@ export function ChatBubble({ msg, onSuggestionClick }: { msg: ChatMessage; onSug
             )}
 
             {/* Report download button */}
-            {dr && msg.dataFilePath && (
+            {dr && (dr.filePath || dr.reportUrl) && (
               <div className="pt-1">
                 <a
-                  href={`/api/chat/report/generate?file_path=${encodeURIComponent(msg.dataFilePath)}`}
+                  href={dr.reportUrl as string || `/api/chat/report/generate?file_path=${encodeURIComponent(dr.filePath as string)}`}
                   download
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-xs hover:bg-primary/20 transition-colors"
                 >
@@ -135,7 +139,17 @@ export function ChatBubble({ msg, onSuggestionClick }: { msg: ChatMessage; onSug
         {/* Sources */}
         {msg.sources && msg.sources.length > 0 && (
           <div className="mt-2 pt-2 border-t border-border">
-            <p className="text-xs text-muted-foreground mb-1">📚 参考来源:</p>
+            <div className="flex items-center gap-2 mb-1">
+              <p className="text-xs text-muted-foreground">📚 参考来源:</p>
+              {msg.knowledgeMode && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700">
+                  {msg.knowledgeMode === "agentic" ? "🔄 Agentic" : msg.knowledgeMode === "graphrag" ? "🕸️ GraphRAG" : "⚡ 标准"}
+                </span>
+              )}
+              {msg.fromCache && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700">💾 缓存</span>
+              )}
+            </div>
             {msg.sources.slice(0, 3).map((s, i) => (
               <p key={i} className="text-xs text-muted-foreground truncate">· {s.filename}: {(s.excerpt || '').slice(0, 80)}...</p>
             ))}
@@ -149,11 +163,28 @@ export function ChatBubble({ msg, onSuggestionClick }: { msg: ChatMessage; onSug
 function ChartView({ chart }: { chart: ChartConfig }) {
   const defaultType = chart.type || "bar";
   const [chartType, setChartType] = useState<string>(defaultType);
-  const dataKey = chart.y || "value";
-  const nameKey = chart.x || "name";
   const rawData = chart.data || [];
 
   if (rawData.length === 0) return null;
+
+  // 智能 key 解析: 如果指定的 x/y 在 data 中不存在，自动回退到实际存在的 key
+  const sampleKeys = rawData[0] && typeof rawData[0] === "object" ? Object.keys(rawData[0]) : [];
+  const resolveKey = (preferred: string, preferNumeric: boolean): string => {
+    if (preferred && sampleKeys.includes(preferred)) return preferred;
+    if (sampleKeys.length === 0) return preferred;
+    if (preferNumeric) {
+      // 找第一个数值列
+      const numKey = sampleKeys.find((k) => typeof rawData[0]?.[k] === "number");
+      if (numKey) return numKey;
+    } else {
+      // 找第一个非数值列 (通常是分类/名称)
+      const strKey = sampleKeys.find((k) => typeof rawData[0]?.[k] !== "number");
+      if (strKey) return strKey;
+    }
+    return sampleKeys[0] || preferred;
+  };
+  const dataKey = resolveKey(chart.y || "value", true);
+  const nameKey = resolveKey(chart.x || "name", false);
 
   const chartTypes = [
     { id: "bar", icon: BarChart3, label: "柱状图" },
@@ -184,9 +215,14 @@ function ChartView({ chart }: { chart: ChartConfig }) {
 
   // 组合图
   if (chartType === "composed") {
-    const series = chart.series || [
+    const rawSeries = chart.series || [
       { dataKey: dataKey, chartType: "bar" },
     ];
+    // 校验 series dataKey 是否存在于 data 中，不存在则回退
+    const series = rawSeries.map((s) => ({
+      ...s,
+      dataKey: sampleKeys.includes(s.dataKey) ? s.dataKey : dataKey,
+    }));
     const secondKey = series.length > 1 ? series[1].dataKey : null;
     return (
       <div className="h-64 w-full">

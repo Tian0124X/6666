@@ -106,6 +106,11 @@ def main():
 
     if cmd == "index":
         cmd_index(args)
+    elif cmd == "build-graph":
+        from app.rag.build_graph import main as build_graph_main
+        import sys
+        sys.argv = [sys.argv[0]] + args
+        build_graph_main()
     elif cmd == "cache":
         cmd_cache(args)
     else:

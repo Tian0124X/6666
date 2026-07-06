@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from app.rag.loader import UniversalDocumentLoader
 from app.rag.splitter import split_documents
 from app.rag.store import add_documents, delete_by_source, get_unique_sources, get_document_count
+from app.rag.neo4j_store import get_neo4j_store
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class BatchIndexResult:
 def index_file(
     file_path: str,
     force: bool = False,
+    pdf_engine: str = "auto",
 ) -> IndexResult:
     """
     索引单个文件。
@@ -53,6 +55,7 @@ def index_file(
     Args:
         file_path: 文件绝对路径
         force: 是否强制重建（跳过已索引检查）
+        pdf_engine: PDF 解析引擎 ("auto"/"mineru"/"pypdf2")
 
     Returns:
         IndexResult
@@ -99,6 +102,8 @@ def index_file(
             )
 
         count = add_documents(chunks)
+        # Neo4j ???????????????????
+        _try_build_graph(chunks, filename)
         elapsed = (time.time() - start) * 1000
 
         logger.info(f"索引完成: {filename} → {count} chunks ({elapsed:.0f}ms)")
@@ -120,6 +125,7 @@ def index_directory(
     directory: str,
     recursive: bool = True,
     force: bool = False,
+    pdf_engine: str = "auto",
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> BatchIndexResult:
     """
@@ -159,7 +165,7 @@ def index_directory(
         if progress_callback:
             progress_callback(i, result.total, Path(file_path).name)
 
-        r = index_file(file_path, force=force)
+        r = index_file(file_path, force=force, pdf_engine=pdf_engine)
         result.files.append(r)
 
         if r.status == "ok":
@@ -185,7 +191,7 @@ def index_directory(
     return result
 
 
-def reindex_all(directory: str = "data/documents") -> BatchIndexResult:
+def reindex_all(directory: str = "data/documents", pdf_engine: str = "auto") -> BatchIndexResult:
     """全量重建索引 — 清空知识库后重新索引目录"""
     from app.rag.store import clear_collection
     from app.rag.retriever import _invalidate_bm25_cache
@@ -195,7 +201,19 @@ def reindex_all(directory: str = "data/documents") -> BatchIndexResult:
     # 清除查询缓存（避免返回旧文档结果）
     query_cache.clear()
     _invalidate_bm25_cache()
-    return index_directory(directory, recursive=True, force=True)
+    return index_directory(directory, recursive=True, force=True, pdf_engine=pdf_engine)
+
+
+def _try_build_graph(chunks, filename: str):
+    """??????? chunks ?? Neo4j ????????"""
+    try:
+        neo4j_store = get_neo4j_store()
+        if neo4j_store and neo4j_store.is_available():
+            entities, relations = neo4j_store.batch_extract_and_store(chunks)
+            if entities > 0:
+                logger.info(f"????: {filename} ? {entities} ??, {relations} ??")
+    except Exception as e:
+        logger.warning(f"?????? ({filename}): {e}")
 
 
 def get_index_status() -> dict:

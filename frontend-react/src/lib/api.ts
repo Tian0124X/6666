@@ -46,6 +46,14 @@ export function streamChat(
     scalar?: unknown;
     insights?: Record<string, unknown>;
     suggested_questions?: string[];
+    file_path?: string;
+    report_url?: string;
+    // RAG 快速通道返回的结构化数据
+    type?: string;
+    sources?: { filename: string; page?: number; excerpt: string }[];
+    mode?: string;
+    level?: number;
+    from_cache?: boolean;
   }) => void
 ): AbortController {
   const controller = new AbortController();
@@ -75,6 +83,9 @@ export function streamChat(
           try {
             const data = JSON.parse(line.slice(6));
             if (data.content) onChunk(data.content);
+            if (data.report_url && onData) {
+              onData({ report_url: data.report_url });
+            }
             if (data.error) { hadError = true; onError(data.error); }
             // 富文本数据
             if (data.type === "data_result" && onData) {
@@ -85,6 +96,17 @@ export function streamChat(
                 scalar: data.scalar,
                 insights: data.insights,
                 suggested_questions: data.suggested_questions,
+                file_path: data.file_path,
+              });
+            }
+            // RAG 快速通道返回的结构化数据
+            if (data.type === "knowledge_result" && onData) {
+              onData({
+                type: "knowledge_result",
+                sources: data.sources,
+                mode: data.mode,
+                level: data.level,
+                from_cache: data.from_cache,
               });
             }
             if (data.done && !hadError) onDone();
@@ -97,9 +119,13 @@ export function streamChat(
       try {
         const data = JSON.parse(buffer.slice(6));
         if (data.content) onChunk(data.content);
+        if (data.report_url && onData) onData({ report_url: data.report_url });
         if (data.error) { hadError = true; onError(data.error); }
         if (data.type === "data_result" && onData) {
-          onData({ code: data.code, table: data.table, chart: data.chart, scalar: data.scalar, insights: data.insights, suggested_questions: data.suggested_questions });
+          onData({ code: data.code, table: data.table, chart: data.chart, scalar: data.scalar, insights: data.insights, suggested_questions: data.suggested_questions, file_path: data.file_path });
+        }
+        if (data.type === "knowledge_result" && onData) {
+          onData({ type: "knowledge_result", sources: data.sources, mode: data.mode, level: data.level, from_cache: data.from_cache });
         }
         if (data.done && !hadError) onDone();
       } catch { /* skip */ }
@@ -160,7 +186,14 @@ export const knowledgeApi = {
       "/knowledge/qa", { method: "POST", body: JSON.stringify({ question, top_k: topK }) }
     ),
   smartQa: (question: string) =>
-    request<{ answer: string; sources: { filename: string; page: number | null; excerpt: string }[] }>(
+    request<{
+      answer: string;
+      sources: { filename: string; page: number | null; excerpt: string }[];
+      mode: string;
+      level: number;
+      from_cache: boolean;
+      iterations: number;
+    }>(
       "/knowledge/qa/smart", { method: "POST", body: JSON.stringify({ question }) }
     ),
   upload: async (file: File, onProgress?: (pct: number) => void) => {
@@ -212,6 +245,16 @@ export const knowledgeApi = {
   rebuildIndex: (dir = "data/documents") =>
     request<Record<string, unknown>>(`/knowledge/index/rebuild?directory=${encodeURIComponent(dir)}`,
       { method: "POST" }),
+  diagnostics: () => request<{
+    vector_backend: string;
+    document_count: number;
+    bm25_status: string;
+    bm25_document_count: number;
+    reranker_available: boolean;
+    llm_available: boolean;
+    chromadb_url: string;
+    pgvector_available: boolean;
+  }>("/knowledge/diagnostics"),
 };
 
 // === Analytics API ===

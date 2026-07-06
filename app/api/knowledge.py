@@ -3,7 +3,7 @@
 import os
 import asyncio
 import logging
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query
 from app.models.request import KnowledgeQARequest
 from app.models.response import KnowledgeQAResponse, UploadResponse
 from app.rag.loader import UniversalDocumentLoader
@@ -11,6 +11,7 @@ from app.rag.splitter import split_documents
 from app.rag.store import add_documents, delete_by_source, get_unique_sources
 from app.rag.retriever import rag_qa
 from app.rag.advanced import smart_rag_qa
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -20,11 +21,11 @@ router = APIRouter()
 _index_status: dict[str, dict] = {}  # filename -> {"status": "pending"|"indexing"|"done"|"error", "chunks": int, "error": str}
 
 
-async def _background_index(file_path: str, filename: str):
+async def _background_index(file_path: str, filename: str, pdf_engine: str = "auto"):
     """后台异步索引任务：解析 → 分块 → 向量化"""
     _index_status[filename] = {"status": "indexing", "chunks": 0, "error": ""}
     try:
-        docs = await asyncio.to_thread(UniversalDocumentLoader.load, file_path)
+        docs = await asyncio.to_thread(UniversalDocumentLoader.load, file_path, pdf_engine=pdf_engine)
         if not docs:
             _index_status[filename] = {"status": "error", "chunks": 0, "error": "文档解析后无内容"}
             return
@@ -104,7 +105,7 @@ async def index_status():
 
 
 @router.post("/index/rebuild", tags=["知识库"])
-async def rebuild_index(directory: str = "data/documents"):
+async def rebuild_index(directory: str = "data/documents", pdf_engine: str = "auto"):
     """全量重建索引（清空后重新索引整个目录，含路径安全校验）"""
     # 路径沙箱检查
     import os
@@ -119,7 +120,7 @@ async def rebuild_index(directory: str = "data/documents"):
         raise HTTPException(status_code=403, detail=f"不允许的目录: {directory}")
 
     from app.rag.indexer import reindex_all
-    result = reindex_all(directory)
+    result = reindex_all(directory, pdf_engine=pdf_engine)
     return {
         "status": "ok",
         "total": result.total,
@@ -132,7 +133,7 @@ async def rebuild_index(directory: str = "data/documents"):
 
 
 @router.post("/upload", response_model=UploadResponse, tags=["知识库"])
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), pdf_engine: str = "auto"):
     """
     上传文档 — 快速保存 + 后台异步索引。
     
@@ -171,7 +172,7 @@ async def upload_document(file: UploadFile = File(...)):
 
     # 触发后台异步索引
     _index_status[safe_filename] = {"status": "pending", "chunks": 0, "error": ""}
-    asyncio.create_task(_background_index(file_path, safe_filename))
+    asyncio.create_task(_background_index(file_path, safe_filename, pdf_engine=pdf_engine))
 
     logger.info(f"文件已保存，后台索引启动: {safe_filename} ({len(content)} bytes)")
     return UploadResponse(
@@ -204,6 +205,10 @@ async def knowledge_qa_smart(req: KnowledgeQARequest):
         return KnowledgeQAResponse(
             answer=result["answer"],
             sources=result.get("sources", []),
+            mode=result.get("mode", "standard"),
+            level=result.get("level", -1),
+            from_cache=result.get("from_cache", False),
+            iterations=result.get("iterations", 1),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"智能问答失败: {str(e)}")
@@ -266,4 +271,33 @@ async def list_documents():
         "total": len(sources),
         "indexed_documents": sources,
         "uploaded_files": list(physical_files),
+    }
+
+
+@router.get("/diagnostics", tags=["知识库"])
+async def rag_diagnostics():
+    """RAG 系统诊断信息 — 快速定位 BM25/后端问题"""
+    from app.rag.store import _detect_backend, get_document_count
+    from app.rag.retriever import _bm25_cache, _get_reranker
+
+    backend = _detect_backend()
+    doc_count = get_document_count()
+
+    bm25_status = "empty"
+    bm25_doc_count = 0
+    if _bm25_cache:
+        for key, (retriever, count, _) in _bm25_cache.items():
+            bm25_status = "ready"
+            bm25_doc_count = count
+            break
+
+    return {
+        "vector_backend": backend,
+        "document_count": doc_count,
+        "bm25_status": bm25_status,
+        "bm25_document_count": bm25_doc_count,
+        "reranker_available": _get_reranker() is not None,
+        "llm_available": settings.is_llm_available,
+        "chromadb_url": f"http://{settings.CHROMA_HOST}:{settings.CHROMA_PORT}",
+        "pgvector_available": backend == "pgvector",
     }

@@ -448,6 +448,24 @@ def _generate_data_insights(df: pd.DataFrame, result: dict | None = None) -> dic
     return insights
 
 
+def _sanitize_chart_data(chart: dict | None) -> dict | None:
+    """清理图表数据: NaN→0, None→0(数值列)或''(字符串列), 确保key一致"""
+    if not chart or not chart.get("data"):
+        return chart
+    data = chart["data"]
+    if not isinstance(data, list) or not data:
+        return chart
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        for k, v in row.items():
+            if v is None:
+                row[k] = 0
+            elif isinstance(v, float) and (v != v):  # NaN check
+                row[k] = 0
+    return chart
+
+
 def _smart_chart_type(
     df: pd.DataFrame,
     result: dict,
@@ -726,20 +744,34 @@ def analyze_with_llm(file_path: str, question: str, with_chart: bool = True) -> 
             chart = _smart_chart_type(df, result, question)
         # LLM 给的 chart_config 中有类型/坐标轴偏好，覆盖智能推断
         if chart and response.chart_config:
-            if response.chart_config.type:
-                chart["type"] = response.chart_config.type
-            if response.chart_config.x:
-                chart["x"] = response.chart_config.x
-            if response.chart_config.y:
-                chart["y"] = response.chart_config.y
-            if response.chart_config.x2:
-                chart["x2"] = response.chart_config.x2
-            if response.chart_config.title and response.chart_config.title != "图表":
-                chart["title"] = response.chart_config.title
-            if response.chart_config.series:
-                chart["series"] = response.chart_config.series
+            cc = response.chart_config
+            # 获取 chart.data 中实际存在的 key 集合，用于校验覆盖是否安全
+            data_keys = set()
+            if chart.get("data") and isinstance(chart["data"], list) and chart["data"]:
+                data_keys = set(chart["data"][0].keys()) if isinstance(chart["data"][0], dict) else set()
+            if cc.type:
+                chart["type"] = cc.type
+            # 仅当 LLM 给的 x/y 在 data key 中实际存在时才覆盖，否则保留智能推断值
+            if cc.x and (not data_keys or cc.x in data_keys):
+                chart["x"] = cc.x
+            if cc.y and (not data_keys or cc.y in data_keys):
+                chart["y"] = cc.y
+            if cc.x2 and (not data_keys or cc.x2 in data_keys):
+                chart["x2"] = cc.x2
+            if cc.title and cc.title != "图表":
+                chart["title"] = cc.title
+            if cc.series:
+                # 校验 series 中 dataKey 是否存在于 data
+                valid_series = [
+                    s for s in cc.series
+                    if not data_keys or s.get("dataKey") in data_keys
+                ]
+                if valid_series:
+                    chart["series"] = valid_series
         elif not chart and response.chart_config and response.chart_config.data:
             chart = response.chart_config.model_dump()
+        # 清理图表数据 (NaN/None → 0)
+        chart = _sanitize_chart_data(chart)
 
     # 7. 数据洞察
     insights = None

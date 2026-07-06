@@ -32,6 +32,8 @@ export interface DataResult {
   report_available?: boolean;
   insights?: DataInsights;
   suggestedQuestions?: string[];
+  filePath?: string;
+  reportUrl?: string;
 }
 
 export interface ChatMessage {
@@ -45,6 +47,11 @@ export interface ChatMessage {
   code?: string;
   dataResult?: DataResult;
   dataFilePath?: string;
+  metadata?: Record<string, unknown>;  // 后端持久化的富数据
+  // RAG 快速通道附加字段
+  knowledgeMode?: string;
+  knowledgeLevel?: number;
+  fromCache?: boolean;
 }
 
 export interface SessionSummary {
@@ -70,9 +77,10 @@ interface ChatStore {
 
   addMessage: (msg: Omit<ChatMessage, "id">) => void;
   updateLastAssistant: (content: string) => void;
-  setLastAssistantData: (data: { code?: string; dataResult?: DataResult }) => void;
+  setLastAssistantData: (data: { code?: string; dataResult?: DataResult; sources?: { filename: string; excerpt: string }[]; knowledgeMode?: string; knowledgeLevel?: number; fromCache?: boolean }) => void;
   setStreaming: (v: boolean) => void;
   clearMessages: () => void;
+  cacheCurrentSession: () => void;
 
   // Session actions
   loadSessions: () => Promise<void>;
@@ -91,6 +99,82 @@ interface ChatStore {
 }
 
 const MAX_MESSAGES = 500; // 从 100 提升到 500，避免长对话丢失
+
+// ====== localStorage 缓存 (L1 快速层) ======
+
+const CACHE_PREFIX = "chat_cache:";
+const CACHE_MAX_ENTRIES = 30;
+const CACHE_MAX_SIZE = 4 * 1024 * 1024; // 4MB 上限
+
+function _cacheMessages(sessionId: string, messages: ChatMessage[]) {
+  try {
+    // 只缓存有实质内容的消息(去掉 isStreaming 等临时字段)
+    const slim = messages.map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      code: m.code,
+      dataResult: m.dataResult,
+      metadata: m.metadata,
+      dataFilePath: m.dataFilePath,
+    }));
+    const key = CACHE_PREFIX + sessionId;
+    const data = JSON.stringify(slim);
+    // 超过大小限制则不缓存
+    if (data.length > CACHE_MAX_SIZE) return;
+    localStorage.setItem(key, data);
+    // LRU 淘汰: 超过条目数时删除最旧的
+    const keys: { key: string; idx: number }[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(CACHE_PREFIX)) {
+        keys.push({ key: k, idx: i });
+      }
+    }
+    if (keys.length > CACHE_MAX_ENTRIES) {
+      // 删除最早的一半
+      keys.slice(0, Math.floor(keys.length / 2)).forEach((e) => localStorage.removeItem(e.key));
+    }
+  } catch { /* localStorage 不可用或满了，静默失败 */ }
+}
+
+function _loadCachedMessages(sessionId: string): ChatMessage[] | null {
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + sessionId);
+    if (!raw) return null;
+    return JSON.parse(raw) as ChatMessage[];
+  } catch {
+    return null;
+  }
+}
+
+function _clearCache(sessionId: string) {
+  try { localStorage.removeItem(CACHE_PREFIX + sessionId); } catch { /* ignore */ }
+}
+
+/** 后端 metadata → 前端 DataResult */
+function _metadataToDataResult(meta: Record<string, unknown>): DataResult | undefined {
+  if (!meta || typeof meta !== "object") return undefined;
+  const dr: DataResult = {};
+  if (meta.table) {
+    const t = meta.table as Record<string, unknown>;
+    dr.type = "dataframe";
+    dr.columns = t.columns as string[];
+    dr.rows = t.rows as unknown[][];
+    dr.shape = t.shape as number[];
+  }
+  if (meta.chart) dr.chart = meta.chart as ChartConfig;
+  if (meta.code) dr.type = dr.type || "dataframe";
+  if (meta.scalar != null) {
+    dr.type = dr.type || "scalar";
+    dr.value = meta.scalar;
+  }
+  if (meta.insights) dr.insights = meta.insights as DataInsights;
+  if (meta.suggested_questions) dr.suggestedQuestions = meta.suggested_questions as string[];
+  if (meta.file_path) dr.filePath = meta.file_path as string;
+  if (meta.report_url) dr.reportUrl = meta.report_url as string;
+  return Object.keys(dr).length > 0 ? dr : undefined;
+}
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   messages: [],
@@ -139,6 +223,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setStreaming: (v) => set({ isStreaming: v }),
   clearMessages: () => set({ messages: [] }),
 
+  cacheCurrentSession: () => {
+    const { activeSessionId, messages } = get();
+    if (activeSessionId && messages.length > 0) {
+      _cacheMessages(activeSessionId, messages);
+    }
+  },
+
   // ====== Session management ======
 
   loadSessions: async () => {
@@ -171,7 +262,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const prev = get()._switchAbort;
     if (prev) prev.abort();
     const ctrl = new AbortController();
-    set({ _switchAbort: ctrl, activeSessionId: sessionId, messages: [] });
+
+    // L1: 先用 localStorage 缓存即时显示 (包含图表)
+    const cached = _loadCachedMessages(sessionId);
+    set({ _switchAbort: ctrl, activeSessionId: sessionId, messages: cached || [] });
 
     try {
       const res = await fetch(`/api/chat/history/${sessionId}`, {
@@ -182,21 +276,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const data = await res.json();
       // 竞态保护: 确认 sessionId 仍然是当前活跃的
       if (get().activeSessionId !== sessionId) return;
-      const msgs = (data.messages || []).map((m: { role: string; content: string }) => ({
-        id: crypto.randomUUID(),
-        role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
-        content: m.content || "",
-      }));
+      const msgs: ChatMessage[] = (data.messages || []).map(
+        (m: { role: string; content: string; metadata?: Record<string, unknown> }) => {
+          const dr = m.metadata ? _metadataToDataResult(m.metadata) : undefined;
+          return {
+            id: crypto.randomUUID(),
+            role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
+            content: m.content || "",
+            metadata: m.metadata,
+            dataResult: dr,
+            code: m.metadata?.code as string | undefined,
+          };
+        }
+      );
       set({ messages: msgs });
+      // 刷新缓存
+      if (msgs.length > 0) _cacheMessages(sessionId, msgs);
     } catch (e: any) {
       if (e.name === "AbortError") return; // 被取消，正常
       console.warn("加载会话消息失败:", e);
+      // API 失败时保留缓存数据不丢失
     }
   },
 
   deleteSession: async (sessionId) => {
     try {
       await sessionsApi.delete(sessionId);
+      _clearCache(sessionId);
       set((s) => {
         const sessions = s.sessions.filter((ss) => ss.session_id !== sessionId);
         const activeSessionId = s.activeSessionId === sessionId

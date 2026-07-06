@@ -24,14 +24,18 @@ logger = logging.getLogger(__name__)
 class ConversationMessage:
     role: str  # user | assistant | system
     content: str
+    metadata: Optional[dict] = None  # 图表/表格/洞察等富数据
     timestamp: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "role": self.role,
             "content": self.content,
             "timestamp": self.timestamp.isoformat(),
         }
+        if self.metadata:
+            d["metadata"] = self.metadata
+        return d
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False)
@@ -41,6 +45,7 @@ class ConversationMessage:
         msg = cls(
             data.get("role", "unknown"),
             data.get("content", ""),
+            metadata=data.get("metadata"),
         )
         ts = data.get("timestamp")
         if ts:
@@ -79,7 +84,7 @@ def _get_redis():
 
 # ====== MySQL 持久化 ======
 
-def _mysql_save(session_id: str, user_id: str, role: str, content: str):
+def _mysql_save(session_id: str, user_id: str, role: str, content: str, metadata: Optional[dict] = None):
     """同步保存到 MySQL（在后台线程执行）"""
     from app.models.database import get_session, ConversationRecord
     sess = get_session()
@@ -89,6 +94,7 @@ def _mysql_save(session_id: str, user_id: str, role: str, content: str):
         record = ConversationRecord(
             session_id=session_id, user_id=user_id,
             role=role, content=content,
+            metadata_json=metadata,
         )
         sess.add(record)
         sess.commit()
@@ -119,7 +125,11 @@ def _mysql_load(session_id: str, user_id: str, limit: int = 20) -> List[Conversa
         # 按时间正序返回
         records = list(reversed(records))
         return [
-            ConversationMessage(role=r.role, content=r.content, timestamp=r.created_at)
+            ConversationMessage(
+                role=r.role, content=r.content,
+                metadata=r.metadata_json if hasattr(r, 'metadata_json') else None,
+                timestamp=r.created_at,
+            )
             for r in records
         ]
     except Exception as e:
@@ -209,9 +219,9 @@ class MemoryStore:
 
     # ---- 写路径: 内存 + Redis (同步) → MySQL (异步) ----
 
-    async def add_message(self, session_id: str, user_id: str, role: str, content: str):
+    async def add_message(self, session_id: str, user_id: str, role: str, content: str, metadata: Optional[dict] = None):
         """添加消息到所有存储层"""
-        msg = ConversationMessage(role, content)
+        msg = ConversationMessage(role, content, metadata=metadata)
         key = self._make_key(session_id, user_id)
 
         # L1: 内存 (同步 + 锁保护)
@@ -236,9 +246,9 @@ class MemoryStore:
         # L3: MySQL (异步后台写入)
         try:
             loop = asyncio.get_running_loop()
-            loop.run_in_executor(None, _mysql_save, session_id, user_id, role, content)
+            loop.run_in_executor(None, _mysql_save, session_id, user_id, role, content, metadata)
         except RuntimeError:
-            _mysql_save(session_id, user_id, role, content)
+            _mysql_save(session_id, user_id, role, content, metadata)
 
     # ---- 会话枚举 ----
 

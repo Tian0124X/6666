@@ -18,6 +18,10 @@ class ChatResponse(BaseModel):
 class KnowledgeQAResponse(BaseModel):
     answer: str
     sources: list[dict] = []
+    mode: str = ""           # standard / agentic / graphrag / direct
+    level: int = -1          # 自适应复杂度等级
+    from_cache: bool = False # 是否命中缓存
+    iterations: int = 1      # Agentic RAG 迭代轮数
 
 
 class ToolListResponse(BaseModel):

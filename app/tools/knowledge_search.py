@@ -34,7 +34,7 @@ class KnowledgeSearchTool(BaseTool):
     def _run(self, query: str) -> str:
         """同步入口 — 自动适配运行中/未运行的事件循环"""
         import asyncio
-        from app.rag.retriever import rag_qa
+        from app.rag.advanced import smart_rag_qa
 
         try:
             # 检测是否已有运行中的事件循环
@@ -43,15 +43,13 @@ class KnowledgeSearchTool(BaseTool):
                 # 已有事件循环：使用 run_coroutine_threadsafe（会阻塞当前线程）
                 import concurrent.futures
                 future = asyncio.run_coroutine_threadsafe(
-                    rag_qa(question=query, k=5, use_expansion=True, use_rerank=True),
+                    smart_rag_qa(question=query),
                     loop,
                 )
                 result = future.result(timeout=30)
             except RuntimeError:
                 # 无运行中的事件循环：直接 asyncio.run
-                result = asyncio.run(
-                    rag_qa(question=query, k=5, use_expansion=True, use_rerank=True)
-                )
+                result = asyncio.run(smart_rag_qa(question=query))
 
             answer = result.get("answer", "")
             sources = result.get("sources", [])
@@ -65,10 +63,10 @@ class KnowledgeSearchTool(BaseTool):
 
     async def _arun(self, query: str) -> str:
         """异步入口"""
-        from app.rag.retriever import rag_qa
+        from app.rag.advanced import smart_rag_qa
 
         try:
-            result = await rag_qa(question=query, k=5, use_expansion=True, use_rerank=True)
+            result = await smart_rag_qa(question=query)
             answer = result.get("answer", "")
             sources = result.get("sources", [])
             if sources:

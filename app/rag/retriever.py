@@ -11,14 +11,15 @@
   - 混合 + BGE Reranker: NDCG 0.95 (+63%)
 """
 
+import asyncio
 import logging
 from typing import List, Tuple, Optional
 from langchain_core.documents import Document
 from langchain_community.retrievers import BM25Retriever
-from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from app.config import settings
-from app.rag.store import get_vector_store
+from app.rag.store import get_vector_store, get_all_documents_for_bm25, get_document_count, _detect_backend
+from app.rag.llm_factory import get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -71,11 +72,11 @@ _bm25_cache: dict[str, tuple[BM25Retriever, int, set[str]]] = {}  # key → (ret
 
 
 def _get_bm25_retriever(k: int = 20) -> Optional[BM25Retriever]:
-    """获取缓存的 BM25 检索器。新增文档时增量追加（避免全量重建）。"""
+    """获取缓存的 BM25 检索器。新增文档时全量重建（后端感知，支持 pgvector/ChromaDB）"""
     global _bm25_cache
     try:
-        store = get_vector_store()
-        current_count = store._collection.count()
+        # 使用后端感知的文档计数（修复: 之前直读 ChromaDB._collection.count()）
+        current_count = get_document_count()
         cache_key = "all"
 
         if cache_key in _bm25_cache:
@@ -85,21 +86,11 @@ def _get_bm25_retriever(k: int = 20) -> Optional[BM25Retriever]:
                 cached_retriever.k = k
                 return cached_retriever
 
-        # 增量更新: 只加载新文档
-        if cache_key in _bm25_cache and current_count > _bm25_cache[cache_key][1]:
-            cached_retriever, cached_count, cached_ids = _bm25_cache[cache_key]
-            new_docs = _get_documents_range(cached_count, current_count)
-            if new_docs:
-                cached_retriever.add_documents(new_docs)
-                new_ids = {doc.page_content[:60] for doc in new_docs}
-                _bm25_cache[cache_key] = (cached_retriever, current_count, cached_ids | new_ids)
-                logger.info(f"BM25 增量更新: +{len(new_docs)} 文档 (总计 {current_count})")
-                cached_retriever.k = k
-                return cached_retriever
-
-        # 全量构建
-        all_docs = _get_all_documents_paginated()
+        # 全量构建（从当前活跃后端获取文档，修复: 之前硬编码 ChromaDB）
+        all_docs = get_all_documents_for_bm25()
         if not all_docs:
+            backend = _detect_backend()
+            logger.warning(f"BM25: 数据源为空 (backend={backend}, count={current_count})")
             return None
 
         bm25 = BM25Retriever.from_documents(
@@ -107,7 +98,7 @@ def _get_bm25_retriever(k: int = 20) -> Optional[BM25Retriever]:
         )
         doc_ids = {doc.page_content[:60] for doc in all_docs}
         _bm25_cache[cache_key] = (bm25, current_count, doc_ids)
-        logger.info(f"BM25 索引已构建: {len(all_docs)} 文档")
+        logger.info(f"BM25 索引已构建: {len(all_docs)} 文档 (backend={_detect_backend()})")
         return bm25
     except Exception as e:
         logger.warning(f"BM25 构建失败: {e}")
@@ -121,22 +112,8 @@ def _invalidate_bm25_cache():
 
 
 def _get_all_documents_paginated(page_size: int = 500, max_total: int = 5000) -> List[Document]:
-    """分页加载 ChromaDB 文档（防止 OOM）"""
-    try:
-        store = get_vector_store()
-        total = store._collection.count()
-        docs = []
-        for offset in range(0, min(total, max_total), page_size):
-            results = store.get(limit=page_size, offset=offset)
-            for i, content in enumerate(results.get("documents", [])):
-                meta = results.get("metadatas", [{}])[i] if results.get("metadatas") else {}
-                docs.append(Document(page_content=content, metadata=meta))
-        if total > max_total:
-            logger.warning(f"文档总数 {total} 超过 BM25 上限 {max_total}，仅索引前 {max_total} 条")
-        return docs
-    except Exception as e:
-        logger.warning(f"无法从 ChromaDB 获取文档列表: {e}")
-        return []
+    """分页加载文档（委托给后端感知函数，兼容旧接口）"""
+    return get_all_documents_for_bm25(limit=max_total)
 
 
 def _get_documents_range(start: int, end: int) -> List[Document]:
@@ -162,7 +139,10 @@ def _get_all_documents() -> List[Document]:
 
 async def _hybrid_search(query: str, k: int = 20) -> List[Document]:
     """
-    混合检索：语义(MMR) + BM25(关键词) → RRF 融合。
+    混合检索：语义(BM25 感知后端) + BM25(关键词) → RRF 融合。
+
+    修复: 之前硬编码 ChromaDB MMR，pgvector 是主后端时 ChromaDB 为空。
+    现在通过 get_vector_search_results() 自动路由到 pgvector 或 ChromaDB。
 
     Args:
         query: 搜索查询
@@ -171,19 +151,14 @@ async def _hybrid_search(query: str, k: int = 20) -> List[Document]:
     Returns:
         RRF 融合后的文档列表
     """
-    # 1. 语义检索 (ChromaDB MMR)
-    vector_store = get_vector_store()
-    vector_retriever = vector_store.as_retriever(
-        search_type="mmr",
-        search_kwargs={
-            "k": k,
-            "fetch_k": k * 3,
-            "lambda_mult": 0.7,
-        },
-    )
-    vector_docs = await vector_retriever.ainvoke(query)
+    backend = _detect_backend()
 
-    # 2. BM25 关键词检索（使用缓存）
+    # 1. 向量检索（后端感知: pgvector 向量+全文 / ChromaDB MMR）
+    vector_docs = await asyncio.to_thread(
+        get_vector_search_results, query, k, k * 3
+    )
+
+    # 2. BM25 关键词检索（缓存，已从正确后端构建）
     bm25_docs = []
     bm25 = _get_bm25_retriever(k=k)
     if bm25:
@@ -191,7 +166,10 @@ async def _hybrid_search(query: str, k: int = 20) -> List[Document]:
 
     # 3. RRF 融合
     fused = _reciprocal_rank_fusion([vector_docs, bm25_docs])
-    logger.info(f"混合检索: 语义 {len(vector_docs)} + BM25 {len(bm25_docs)} → RRF {len(fused)}")
+    logger.info(
+        f"混合检索 [{backend}]: 语义 {len(vector_docs)} + BM25 {len(bm25_docs)} "
+        f"→ RRF {len(fused)} | bm25_active={bm25 is not None}"
+    )
     return fused
 
 
@@ -282,13 +260,7 @@ def _expand_queries(question: str) -> List[str]:
 {num_variants} 个搜索查询：""")
 
     try:
-        llm = ChatOpenAI(
-            model=settings.LLM_MODEL,
-            api_key=settings.LLM_API_KEY,
-            base_url=settings.LLM_BASE_URL,
-            temperature=0.3,
-            timeout=10,
-        )
+        llm = get_llm(temperature=0.3, timeout=10)
         chain = prompt | llm
         result = chain.invoke({"question": question})
         queries = [q.strip("- ").strip() for q in result.content.strip().split("\n") if q.strip()]
@@ -398,13 +370,7 @@ def _llm_rerank_fallback(question: str, docs: List[Document], top_n: int = 5) ->
 只回答数字。""")
 
     try:
-        llm = ChatOpenAI(
-            model=settings.LLM_MODEL,
-            api_key=settings.LLM_API_KEY,
-            base_url=settings.LLM_BASE_URL,
-            temperature=0,
-            timeout=settings.LLM_TIMEOUT,
-        )
+        llm = get_llm(temperature=0)
 
         scored = []
         for doc in docs:
@@ -477,6 +443,24 @@ def _format_context(docs: List[Document]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def build_sources(docs: List[Document]) -> list[dict]:
+    """从检索文档构建来源列表 — 单点维护
+
+    被 retriever.py 的 _generate_answer 和 advanced.py 的多个函数复用。
+    """
+    sources, seen = [], set()
+    for doc in docs:
+        fn = doc.metadata.get("filename", "未知")
+        if fn not in seen:
+            seen.add(fn)
+            sources.append({
+                "filename": fn,
+                "page": doc.metadata.get("page"),
+                "excerpt": doc.page_content[:200],
+            })
+    return sources
+
+
 def _generate_answer(question: str, docs: List[Document]) -> Tuple[str, List[dict]]:
     """使用 LLM 生成反幻觉回答"""
     if not docs:
@@ -495,13 +479,7 @@ def _generate_answer(question: str, docs: List[Document]) -> Tuple[str, List[dic
 
     context = _format_context(docs)
 
-    llm = ChatOpenAI(
-        model=settings.LLM_MODEL,
-        api_key=settings.LLM_API_KEY,
-        base_url=settings.LLM_BASE_URL,
-        temperature=0.1,
-        timeout=settings.LLM_TIMEOUT,
-    )
+    llm = get_llm(temperature=0.1)
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", RAG_SYSTEM_PROMPT),
@@ -510,20 +488,8 @@ def _generate_answer(question: str, docs: List[Document]) -> Tuple[str, List[dic
     chain = prompt | llm
     response = chain.invoke({"context": context, "question": question})
 
-    # 构建来源列表
-    sources = []
-    seen = set()
-    for doc in docs:
-        filename = doc.metadata.get("filename", "未知")
-        if filename not in seen:
-            seen.add(filename)
-            sources.append({
-                "filename": filename,
-                "page": doc.metadata.get("page"),
-                "excerpt": doc.page_content[:200],
-            })
-
-    return response.content, sources
+    # 构建来源列表（统一构建器）
+    return response.content, build_sources(docs)
 
 
 # ============================================================

@@ -10,19 +10,19 @@ logger = logging.getLogger(__name__)
 
 
 def _int_env(key: str, default: int) -> int:
-    """安全读取整数环境变量，格式错误时回退默认值并告警"""
+    """安全读取整数环境变量，格式错误时回退默认值并警告"""
     val = os.getenv(key, str(default))
     try:
         return int(val)
     except (ValueError, TypeError):
-        logger.warning(f"配置 {key}={val} 不是有效整数，使用默认 {default}")
+        logger.warning(f"閰嶇疆 {key}={val} 涓嶆槸鏈夋晥鏁存暟锛屼娇鐢ㄩ粯璁?{default}")
         return default
 
 
 class Settings:
     """全局配置单例（含启动验证）"""
 
-    # === LLM (DeepSeek，兼容所有 OpenAI 接口) ===
+    # === LLM (DeepSeek锛屽吋瀹规墍鏈?OpenAI 鎺ュ彛) ===
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", os.getenv("DASHSCOPE_API_KEY", ""))
     LLM_MODEL: str = os.getenv("LLM_MODEL", "deepseek-chat")
     LLM_BASE_URL: str = os.getenv(
@@ -52,7 +52,7 @@ class Settings:
     PG_USER: str = os.getenv("PG_USER", "eao_user")
     PG_PASSWORD: str = os.getenv("PG_PASSWORD", "")
 
-    # === 应用 ===
+    # === 搴旂敤 ===
     APP_ENV: str = os.getenv("APP_ENV", "development")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     MAX_RETRY: int = _int_env("MAX_RETRY", 3)
@@ -72,6 +72,22 @@ class Settings:
     OA_API_URL: str = os.getenv("OA_API_URL", "")
     CRM_API_URL: str = os.getenv("CRM_API_URL", "")
 
+    # === RAG 璋冧紭 ===
+    RAG_BM25_ENABLED: bool = os.getenv("RAG_BM25_ENABLED", "true").lower() == "true"
+    RAG_SEARCH_K: int = _int_env("RAG_SEARCH_K", 20)
+    RAG_RERANK_TOP_N: int = _int_env("RAG_RERANK_TOP_N", 5)
+    RAG_KNOWLEDGE_FAST_CHANNEL: bool = os.getenv("RAG_KNOWLEDGE_FAST_CHANNEL", "true").lower() == "true"
+    # === Neo4j (???????) ===
+    NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "")
+    NEO4J_ENABLED: bool = os.getenv("NEO4J_ENABLED", "false").lower() == "true"
+
+
+    # === MinerU PDF 澧炲己瑙ｆ瀽 ===
+    PDF_PARSER: str = os.getenv("PDF_PARSER", "auto")
+    MINERU_OCR: bool = os.getenv("MINERU_OCR", "false").lower() == "true"
+
     def validate(self) -> list[str]:
         """启动时验证关键配置。返回警告列表。"""
         warnings = []
@@ -79,6 +95,10 @@ class Settings:
             warnings.append(
                 "LLM_API_KEY 未配置或为占位符，请设置 .env 中的 LLM_API_KEY。"
                 "LLM 调用将使用回退模式（规则引擎/Mock）。"
+            )
+        if self.NEO4J_ENABLED and not self.NEO4J_PASSWORD:
+            warnings.append(
+                "NEO4J_ENABLED=true 但 NEO4J_PASSWORD 为空，Neo4j 连接可能失败。"
             )
         if not self.MYSQL_PASSWORD:
             warnings.append("MYSQL_PASSWORD 为空，数据库连接可能失败。")
@@ -102,3 +122,4 @@ class Settings:
 
 
 settings = Settings()
+

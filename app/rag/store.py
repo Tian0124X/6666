@@ -196,3 +196,64 @@ def clear_collection():
             logger.warning(f"已清空知识库 ({deleted} 个 chunks)")
     except Exception as e:
         logger.warning(f"清空知识库失败: {e}")
+
+
+# ============================================================
+# 后端感知读取函数 — 修复 BM25/向量检索数据源不对称缺陷
+# ============================================================
+
+def get_all_documents_for_bm25(limit: int = 5000) -> List[Document]:
+    """从当前活跃后端获取所有文档（BM25 索引构建用）
+
+    修复: retriever.py 之前硬编码从 ChromaDB 读取，
+    当 pgvector 是主后端时 ChromaDB 为空，BM25 返回空结果。
+    """
+    backend = _detect_backend()
+    if backend == "pgvector":
+        from app.rag.pgvector_store import get_pgvector_store
+        pg = get_pgvector_store()
+        if pg:
+            return pg.get_all_documents(limit=limit)
+
+    # ChromaDB 回退（分页加载）
+    try:
+        store = get_vector_store()
+        total = store._collection.count()
+        docs = []
+        for offset in range(0, min(total, limit), 500):
+            results = store.get(limit=500, offset=offset)
+            for i, content in enumerate(results.get("documents", [])):
+                meta = results.get("metadatas", [{}])[i] if results.get("metadatas") else {}
+                docs.append(Document(page_content=content, metadata=meta))
+        if total > limit:
+            logger.warning(f"文档总数 {total} 超过 BM25 上限 {limit}，仅索引前 {limit} 条")
+        return docs
+    except Exception as e:
+        logger.warning(f"ChromaDB 获取文档失败: {e}")
+        return []
+
+
+def get_vector_search_results(query: str, k: int = 20, fetch_k: int = 60) -> List[Document]:
+    """从当前活跃后端执行向量检索
+
+    修复: _hybrid_search 之前硬编码用 ChromaDB MMR，
+    当 pgvector 是主后端时直接使用 pgvector 的向量+全文混合检索。
+    """
+    backend = _detect_backend()
+    if backend == "pgvector":
+        from app.rag.pgvector_store import get_pgvector_store
+        pg = get_pgvector_store()
+        if pg:
+            return pg.search(query, k=k, fetch_k=fetch_k)
+
+    # ChromaDB MMR 回退
+    try:
+        store = get_vector_store()
+        retriever = store.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": k, "fetch_k": fetch_k, "lambda_mult": 0.7},
+        )
+        return retriever.invoke(query)
+    except Exception as e:
+        logger.warning(f"ChromaDB 向量检索失败: {e}")
+        return []

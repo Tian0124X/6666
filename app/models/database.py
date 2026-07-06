@@ -20,6 +20,7 @@ class ConversationRecord(Base):
     user_id = Column(String(64), nullable=False, index=True)
     role = Column(Enum("user", "assistant", "system"), nullable=False)
     content = Column(Text, nullable=False)
+    metadata_json = Column(JSON, nullable=True)  # 图表/表格/洞察等富数据
     created_at = Column(TIMESTAMP, server_default=func.now())
 
 
@@ -135,6 +136,22 @@ _engine_failed = False
 _SessionLocal = None
 
 
+def _auto_migrate(engine):
+    """轻量级自动迁移: 检测并添加缺失的列"""
+    from sqlalchemy import inspect as sa_inspect
+    try:
+        inspector = sa_inspect(engine)
+        # conversations 表: 添加 metadata_json 列
+        if "conversations" in inspector.get_table_names():
+            cols = {c["name"] for c in inspector.get_columns("conversations")}
+            if "metadata_json" not in cols:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE conversations ADD COLUMN metadata_json JSON NULL"))
+                logger.info("自动迁移: conversations 表已添加 metadata_json 列")
+    except Exception as e:
+        logger.warning(f"自动迁移失败: {e}")
+
+
 def _get_engine():
     global _engine, _engine_failed
     if _engine_failed:
@@ -152,6 +169,8 @@ def _get_engine():
             with _engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
             Base.metadata.create_all(_engine)
+            # 自动迁移: 为已有表添加新列
+            _auto_migrate(_engine)
             logger.info("MySQL 连接池就绪")
         except Exception as e:
             _engine_failed = True

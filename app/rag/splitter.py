@@ -26,6 +26,12 @@ CHUNK_PRESETS = {
         "separators": ["\n\n", "\n", "。", "；", "，", ". ", "; ", ", ", " "],
         "description": "PDF 文档: 大块 800 + 高重叠 200，保留段落完整性",
     },
+    "pdf_mineru": {
+        "chunk_size": 1200,
+        "chunk_overlap": 200,
+        "separators": ["\n\n## ", "\n\n### ", "\n\n", "\n|", "\n", "。", "！", "？"],
+        "description": "PDF(MinerU): 大块 1200 + Markdown 边界优先，表格保护",
+    },
     "docx": {
         "chunk_size": 600,
         "chunk_overlap": 150,
@@ -86,6 +92,10 @@ def create_splitter_for_document(doc: Document, file_type: Optional[str] = None)
     """
     if file_type is None:
         file_type = doc.metadata.get("file_type", "default")
+
+    # MinerU 解析的 PDF 使用更大块 + Markdown 感知分隔符
+    if file_type == "pdf" and doc.metadata.get("parser") == "mineru":
+        file_type = "pdf_mineru"
     preset = get_preset_for_type(file_type)
     logger.info(f"分块策略: {file_type} → {preset['description']}")
     return RecursiveCharacterTextSplitter(
@@ -99,7 +109,7 @@ def create_chinese_splitter(
     chunk_size: int = 500,
     chunk_overlap: int = 150,
 ) -> RecursiveCharacterTextSplitter:
-    """
+    """ 
     创建中文优化的递归分块器 (兼容旧接口)。
 
     分隔符优先级（从高到低）：
@@ -144,8 +154,36 @@ def split_documents(
     - chunk_id: 序号
     - chunk_preview: 前 100 字符预览
     """
+    # 检查是否为 MinerU 输出的 Markdown PDF
+    is_mineru_pdf = any(
+        doc.metadata.get("parser") == "mineru" and doc.metadata.get("file_type") == "pdf"
+        for doc in documents
+    )
     splitter = create_chinese_splitter(chunk_size, chunk_overlap)
     chunks = splitter.split_documents(documents)
+
+    # 对 MinerU 的 Markdown 表格做后保护
+    if is_mineru_pdf and len(chunks) > 1:
+        merged = []
+        buffer = None
+        for chunk in chunks:
+            text = chunk.page_content
+            if buffer is not None:
+                if text.strip().startswith("|"):
+                    buffer.page_content += "\n" + text
+                    buffer.metadata["chunk_preview"] = buffer.page_content[:100]
+                    continue
+                else:
+                    merged.append(buffer)
+                    buffer = None
+            if text.strip().endswith("|") or "| ---" in text:
+                buffer = chunk
+            else:
+                merged.append(chunk)
+        if buffer is not None:
+            merged.append(buffer)
+        chunks = merged
+        logger.info(f"表格保护: {len(chunks)} 个最终 chunk (合并后)")
 
     # 丰富元数据
     for i, chunk in enumerate(chunks):

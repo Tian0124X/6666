@@ -204,6 +204,30 @@ class PGVectorStore:
         cur.close()
         logger.warning(f"pgvector: 已清空 ({count} 条)")
 
+    def get_all_documents(self, limit: int = 5000, offset: int = 0) -> List[Document]:
+        """分页获取所有文档（用于 BM25 索引构建）"""
+        try:
+            cur = self.conn.cursor()
+            cur.execute(
+                """SELECT content, metadata, source, filename
+                   FROM vector_documents
+                   ORDER BY chunk_index
+                   LIMIT %s OFFSET %s""",
+                (limit, offset),
+            )
+            rows = cur.fetchall()
+            cur.close()
+            return [
+                Document(
+                    page_content=row[0],
+                    metadata=self._deserialize_meta(row[1], row[2], row[3]),
+                )
+                for row in rows
+            ]
+        except Exception as e:
+            logger.warning(f"pgvector get_all_documents 失败: {e}")
+            return []
+
     def close(self):
         if self._conn and not self._conn.closed:
             self._conn.close()
