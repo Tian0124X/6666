@@ -18,7 +18,7 @@ from langchain_core.documents import Document
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.prompts import ChatPromptTemplate
 from app.config import settings
-from app.rag.store import get_vector_store, get_all_documents_for_bm25, get_document_count, _detect_backend
+from app.rag.store import get_vector_store, get_all_documents_for_bm25, get_document_count, _detect_backend, get_vector_search_results
 from app.rag.llm_factory import get_llm
 
 logger = logging.getLogger(__name__)
@@ -111,6 +111,18 @@ def _invalidate_bm25_cache():
     _bm25_cache.clear()
 
 
+def warmup_bm25(k: int = 20):
+    """预热 BM25 索引 — 在应用启动或文档索引完成后调用，消除首次查询冷启动延迟"""
+    try:
+        bm25 = _get_bm25_retriever(k=k)
+        if bm25:
+            logger.info(f"BM25 索引预热完成: {bm25.k} 文档就绪")
+        else:
+            logger.debug("BM25 预热跳过: 知识库为空")
+    except Exception as e:
+        logger.warning(f"BM25 预热失败 (非致命): {e}")
+
+
 def _get_all_documents_paginated(page_size: int = 500, max_total: int = 5000) -> List[Document]:
     """分页加载文档（委托给后端感知函数，兼容旧接口）"""
     return get_all_documents_for_bm25(limit=max_total)
@@ -144,6 +156,8 @@ async def _hybrid_search(query: str, k: int = 20) -> List[Document]:
     修复: 之前硬编码 ChromaDB MMR，pgvector 是主后端时 ChromaDB 为空。
     现在通过 get_vector_search_results() 自动路由到 pgvector 或 ChromaDB。
 
+    2026 优化: 向量检索和 BM25 并行执行 (asyncio.gather)，延迟从 sum 降到 max。
+
     Args:
         query: 搜索查询
         k: 每路检索返回数量
@@ -154,21 +168,25 @@ async def _hybrid_search(query: str, k: int = 20) -> List[Document]:
     backend = _detect_backend()
 
     # 1. 向量检索（后端感知: pgvector 向量+全文 / ChromaDB MMR）
-    vector_docs = await asyncio.to_thread(
-        get_vector_search_results, query, k, k * 3
-    )
+    vector_task = asyncio.to_thread(get_vector_search_results, query, k, k * 3)
 
-    # 2. BM25 关键词检索（缓存，已从正确后端构建）
-    bm25_docs = []
-    bm25 = _get_bm25_retriever(k=k)
-    if bm25:
-        bm25_docs = await bm25.ainvoke(query)
+    # 2. BM25 关键词检索（缓存，已从正确后端构建）— 与向量并行
+    async def _bm25_search() -> List[Document]:
+        bm25 = _get_bm25_retriever(k=k)
+        if bm25:
+            return await bm25.ainvoke(query)
+        return []
+
+    bm25_task = asyncio.create_task(_bm25_search())
+
+    # 并行等待两路结果
+    vector_docs, bm25_docs = await asyncio.gather(vector_task, bm25_task)
 
     # 3. RRF 融合
     fused = _reciprocal_rank_fusion([vector_docs, bm25_docs])
     logger.info(
         f"混合检索 [{backend}]: 语义 {len(vector_docs)} + BM25 {len(bm25_docs)} "
-        f"→ RRF {len(fused)} | bm25_active={bm25 is not None}"
+        f"→ RRF {len(fused)}"
     )
     return fused
 
@@ -288,16 +306,105 @@ def _expand_queries(question: str) -> List[str]:
 _reranker_model = None
 
 
+def _patch_tokenizer_prepare_for_model(tokenizer):
+    """为 transformers >=5.0 补回 prepare_for_model 方法。
+
+    FlagEmbedding 1.4.x 调用:
+        item = tokenizer.prepare_for_model(q_ids, p_ids, truncation=..., max_length=...)
+
+    transformers 5.0 移除了 prepare_for_model / encode_plus /
+    build_inputs_with_special_tokens 等一系列方法。
+    此处手工构建 input_ids + attention_mask 实现等价功能。
+    """
+    # XLMRoBERTa: bos=0, sep=2 (双 sep 分隔 query 和 passage)
+    bos_id = getattr(tokenizer, "bos_token_id", None) or getattr(tokenizer, "cls_token_id", 0)
+    sep_id = getattr(tokenizer, "sep_token_id", 2)
+
+    def _prepare_for_model(
+        self, ids, pair_ids=None,
+        max_length=None, padding=False, truncation=False,
+        return_tensors=None, **kwargs,
+    ):
+        # 1. 合并: [BOS] + ids + [SEP, SEP] + pair_ids + [SEP]
+        if pair_ids is not None:
+            input_ids = [bos_id] + list(ids) + [sep_id, sep_id] + list(pair_ids) + [sep_id]
+        else:
+            input_ids = [bos_id] + list(ids) + [sep_id]
+
+        # 2. Truncation
+        if truncation and max_length and len(input_ids) > max_length:
+            if truncation == "only_second" and pair_ids is not None:
+                # 保留 query 完整, 截断 passage
+                q_part = [bos_id] + list(ids) + [sep_id, sep_id]
+                query_len = len(q_part)
+                available = max_length - query_len - 1  # -1 for final SEP
+                if available > 0:
+                    pair_ids = list(pair_ids)[:available]
+                    input_ids = [bos_id] + list(ids) + [sep_id, sep_id] + pair_ids + [sep_id]
+                else:
+                    input_ids = input_ids[:max_length]
+            else:
+                input_ids = input_ids[:max_length]
+
+        attention_mask = [1] * len(input_ids)
+
+        result = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+
+        # token_type_ids: RoBERTa 系列不需要，但其他模型可能需要
+        if getattr(self, "type_vocab_size", 0) > 0:
+            if pair_ids is not None:
+                q_len = len([bos_id] + list(ids) + [sep_id, sep_id])
+                result["token_type_ids"] = [0] * q_len + [1] * (len(input_ids) - q_len)
+            else:
+                result["token_type_ids"] = [0] * len(input_ids)
+
+        return result
+
+    import types
+    tokenizer.prepare_for_model = types.MethodType(_prepare_for_model, tokenizer)
+
+
 def _get_reranker():
-    """懒加载 BGE Cross-Encoder 重排序模型"""
+    """懒加载 BGE Cross-Encoder 重排序模型（本地缓存优先）"""
     global _reranker_model
     if _reranker_model is None:
         try:
+            import os
             from FlagEmbedding import FlagReranker
             model_name = "BAAI/bge-reranker-v2-m3"
             logger.info(f"正在加载重排序模型: {model_name}...")
-            _reranker_model = FlagReranker(model_name, use_fp16=True)
-            logger.info("BGE-Reranker 就绪")
+
+            # 优先本地缓存，避免 HuggingFace 网络超时
+            # 尝试顺序: 纯离线 → 国内镜像 → 直连（默认）
+            loaded = None
+            for strategy, env in [
+                ("local_cache", {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}),
+                ("hf_mirror", {"HF_ENDPOINT": os.getenv("HF_ENDPOINT", "https://hf-mirror.com")}),
+                ("direct", {}),
+            ]:
+                try:
+                    for k, v in env.items():
+                        os.environ.setdefault(k, v)
+                    loaded = FlagReranker(model_name, use_fp16=True)
+
+                    # --- transformers >=5.0 兼容补丁: prepare_for_model / encode_plus 已移除 ---
+                    # FlagEmbedding 1.4.x 调用 prepare_for_model(token_ids, pair_ids, ...)
+                    # 用底层 build_inputs_with_special_tokens + create_token_type_ids_from_sequences 重建
+                    if not hasattr(loaded.tokenizer, "prepare_for_model"):
+                        _patch_tokenizer_prepare_for_model(loaded.tokenizer)
+                        logger.info("Reranker tokenizer 已打 transformers>=5.0 兼容补丁")
+
+                    logger.info(f"BGE-Reranker 就绪 (策略: {strategy})")
+                    break
+                except Exception as e:
+                    logger.debug(f"Reranker 加载失败 ({strategy}): {e}")
+                    if strategy == "direct":
+                        raise
+
+            _reranker_model = loaded if loaded is not None else False
         except ImportError:
             logger.warning(
                 "FlagEmbedding 未安装，降级到 LLM 重排序。"
@@ -479,17 +586,28 @@ def _generate_answer(question: str, docs: List[Document]) -> Tuple[str, List[dic
 
     context = _format_context(docs)
 
-    llm = get_llm(temperature=0.1)
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", RAG_SYSTEM_PROMPT),
-        ("user", RAG_USER_PROMPT),
-    ])
-    chain = prompt | llm
-    response = chain.invoke({"context": context, "question": question})
+    try:
+        llm = get_llm(temperature=0.1)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", RAG_SYSTEM_PROMPT),
+            ("user", RAG_USER_PROMPT),
+        ])
+        chain = prompt | llm
+        response = chain.invoke({"context": context, "question": question})
+        answer = response.content
+    except Exception as e:
+        logger.error(f"LLM 生成回答失败: {e}")
+        # 降级：返回检索摘要
+        excerpts = "\n".join(
+            f"- [{doc.metadata.get('filename', '未知')}] {doc.page_content[:200]}"
+            for doc in docs[:3]
+        )
+        answer = (
+            f"⚠️ LLM 调用失败（{str(e)[:100]}），以下是检索到的相关内容摘要：\n\n{excerpts}"
+        )
 
     # 构建来源列表（统一构建器）
-    return response.content, build_sources(docs)
+    return answer, build_sources(docs)
 
 
 # ============================================================
@@ -524,15 +642,14 @@ async def rag_qa(
     # 1. 查询扩展
     queries = _expand_queries(question) if use_expansion else [question]
 
-    # 2. 混合检索 (多查询 → 各检索 → RRF 融合 → 去重)
+    # 2. 混合检索 (多查询 → 并行检索 → RRF 融合 → 去重)
     fetch_k = 20 if use_rerank else k
-    all_results: List[List[Document]] = []
-    for q in queries:
-        docs = await _hybrid_search(q, k=fetch_k)
-        all_results.append(docs)
+    all_results = await asyncio.gather(*[
+        _hybrid_search(q, k=fetch_k) for q in queries
+    ])
 
     # RRF 融合多查询结果
-    all_docs = _reciprocal_rank_fusion(all_results)
+    all_docs = _reciprocal_rank_fusion(list(all_results))
 
     logger.info(f"混合检索: {len(all_docs)} 个唯一文档 (来自 {len(queries)} 个查询)")
 

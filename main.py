@@ -91,6 +91,14 @@ def _load_models():
     except Exception as e:
         logger.error(f"  Reranker 加载失败: {e}")
 
+    try:
+        from app.rag.retriever import warmup_bm25
+        warmup_bm25(k=20)
+        _model_load_status["bm25"] = True
+        logger.info("  BM25 索引就绪")
+    except Exception as e:
+        logger.warning(f"  BM25 预热跳过: {e}")
+
 
 app = FastAPI(
     title="企业智能办公助手平台 API",

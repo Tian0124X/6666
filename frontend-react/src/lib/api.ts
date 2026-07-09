@@ -196,6 +196,88 @@ export const knowledgeApi = {
     }>(
       "/knowledge/qa/smart", { method: "POST", body: JSON.stringify({ question }) }
     ),
+  /** SSE 流式智能问答 — 实时推送检索进度 + 逐段回答 */
+  streamSmartQa: (
+    question: string,
+    onStatus: (status: string) => void,
+    onChunk: (text: string) => void,
+    onData: (data: {
+      sources?: { filename: string; page?: number; excerpt: string }[];
+      mode?: string;
+      level?: number;
+      from_cache?: boolean;
+      iterations?: number;
+    }) => void,
+    onDone: () => void,
+    onError: (err: string) => void,
+  ): AbortController => {
+    const controller = new AbortController();
+
+    fetch(`${BASE}/knowledge/qa/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeader() },
+      body: JSON.stringify({ question }),
+      signal: controller.signal,
+    }).then(async (res) => {
+      if (!res.ok || !res.body) {
+        onError(`HTTP ${res.status}`);
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let hadError = false;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.status) onStatus(data.status);
+                if (data.content) onChunk(data.content);
+                if (data.type === "knowledge_result") {
+                  onData({
+                    sources: data.sources,
+                    mode: data.mode,
+                    level: data.level,
+                    from_cache: data.from_cache,
+                    iterations: data.iterations,
+                  });
+                }
+                if (data.error) { hadError = true; onError(data.error); }
+                if (data.done && !hadError) onDone();
+              } catch { /* skip malformed JSON */ }
+            }
+          }
+        }
+        // 处理残留 buffer
+        if (buffer.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(buffer.slice(6));
+            if (data.status) onStatus(data.status);
+            if (data.content) onChunk(data.content);
+            if (data.type === "knowledge_result") {
+              onData({ sources: data.sources, mode: data.mode, level: data.level, from_cache: data.from_cache, iterations: data.iterations });
+            }
+            if (data.error) { hadError = true; onError(data.error); }
+            if (data.done && !hadError) onDone();
+          } catch { /* skip */ }
+        }
+        if (!hadError) onDone();
+      } catch (e: any) {
+        if (e.name !== "AbortError") onError(e.message);
+      }
+    }).catch((e) => {
+      if (e.name !== "AbortError") onError(e.message);
+    });
+
+    return controller;
+  },
   upload: async (file: File, onProgress?: (pct: number) => void) => {
     const fd = new FormData();
     fd.append("file", file);
@@ -254,6 +336,14 @@ export const knowledgeApi = {
     llm_available: boolean;
     chromadb_url: string;
     pgvector_available: boolean;
+    graph_backend: string;
+    lightrag_available: boolean;
+    neo4j_available: boolean;
+    graph_stats: {
+      nodes: number;
+      relationships: number;
+      type_distribution: { type: string; count: number }[];
+    } | null;
   }>("/knowledge/diagnostics"),
 };
 

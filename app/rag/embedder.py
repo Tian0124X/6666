@@ -1,11 +1,15 @@
-"""BGE 向量化模块 — 线程安全懒加载"""
+"""BGE 向量化模块 — 线程安全懒加载 + HuggingFace 离线容错"""
 
+import os
 import logging
 import threading
 from typing import List
 from langchain_core.embeddings import Embeddings
 
 logger = logging.getLogger(__name__)
+
+# HuggingFace 镜像（国内加速），可通过 HF_ENDPOINT 环境变量覆盖
+_HF_MIRROR = os.getenv("HF_ENDPOINT", "https://hf-mirror.com")
 
 
 class BGEEmbeddings(Embeddings):
@@ -19,6 +23,8 @@ class BGEEmbeddings(Embeddings):
 
     线程安全：懒加载 + 锁，避免多请求并发加载。
     lifespan 预热后在 executor 中加载，不阻塞事件循环。
+
+    HuggingFace 容错：优先本地缓存，网络不通时离线加载。
     """
 
     def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5"):
@@ -29,7 +35,7 @@ class BGEEmbeddings(Embeddings):
 
     @property
     def model(self):
-        """线程安全懒加载"""
+        """线程安全懒加载，离线优先以避免 HuggingFace 网络不可达"""
         if self._model is not None:
             return self._model
 
@@ -37,10 +43,27 @@ class BGEEmbeddings(Embeddings):
             if self._model is not None:
                 return self._model
             from sentence_transformers import SentenceTransformer
-            logger.info(f"加载 BGE 模型: {self.model_name} (首次, ~20s)...")
-            self._model = SentenceTransformer(self.model_name)
-            self._dim = self._model.get_embedding_dimension()
-            logger.info(f"BGE 模型就绪 ({self._dim}维)")
+
+            # 策略：优先本地缓存 → 镜像 → 直连 HuggingFace
+            for strategy, kwargs in [
+                ("local_cache", {"local_files_only": True}),
+                ("hf_mirror", {"local_files_only": False}),
+            ]:
+                try:
+                    if strategy == "hf_mirror":
+                        # 使用国内镜像加速
+                        os.environ.setdefault("HF_ENDPOINT", _HF_MIRROR)
+
+                    logger.info(f"加载 BGE 模型: {self.model_name} (策略: {strategy})...")
+                    self._model = SentenceTransformer(self.model_name, **kwargs)
+                    self._dim = self._model.get_embedding_dimension()
+                    logger.info(f"BGE 模型就绪 ({self._dim}维, 策略: {strategy})")
+                    break
+                except Exception as e:
+                    logger.debug(f"BGE 加载失败 ({strategy}): {e}")
+                    if strategy == "local_cache":
+                        continue
+                    raise
 
         return self._model
 

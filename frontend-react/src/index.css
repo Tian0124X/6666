@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap');
 
 @theme {
   --color-primary: #2563eb;
@@ -18,6 +19,18 @@
   --color-foreground: #0f172a;
   --color-card: #ffffff;
   --color-card-foreground: #0f172a;
+
+  /* === Knowledge page design tokens === */
+  --color-kb-bg: #FAF8F5;
+  --color-kb-card: #ffffff;
+  --color-kb-accent: #1A8A7D;
+  --color-kb-accent-foreground: #ffffff;
+  --color-kb-highlight: #D4952B;
+  --color-kb-muted: #5B6E7D;
+  --color-kb-error: #C84B3C;
+  --color-kb-border: #E8E4DD;
+  --color-kb-surface: #F2EFEA;
+  --color-kb-ink: #0A1628;
 }
 
 .dark {
@@ -38,6 +51,28 @@
   --color-foreground: #f1f5f9;
   --color-card: #1e293b;
   --color-card-foreground: #f1f5f9;
+
+  /* Knowledge dark mode */
+  --color-kb-bg: #0A1628;
+  --color-kb-card: #0F1F35;
+  --color-kb-accent: #2A9D8F;
+  --color-kb-accent-foreground: #ffffff;
+  --color-kb-highlight: #E8B840;
+  --color-kb-muted: #8899A6;
+  --color-kb-error: #E05548;
+  --color-kb-border: #1A2D45;
+  --color-kb-surface: #132238;
+  --color-kb-ink: #F2EFEA;
+}
+
+:root {
+  --font-display: 'Newsreader', Georgia, serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 body {

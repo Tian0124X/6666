@@ -21,6 +21,28 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# 图谱后端分发
+# ============================================================
+
+def _get_graph_store():
+    """获取可用的图谱后端（GRAPH_BACKEND 配置驱动）
+
+    Returns:
+        (store, backend_name) 或 (None, "none")
+    """
+    if settings.GRAPH_BACKEND == "lightrag":
+        from app.rag.lightrag_store import get_lightrag_store
+        store = get_lightrag_store()
+        if store and store.is_available():
+            return store, "lightrag"
+    elif settings.GRAPH_BACKEND == "neo4j":
+        store = get_neo4j_store()
+        if store and store.is_available():
+            return store, "neo4j"
+    return None, "none"
+
+
+# ============================================================
 # 1. Adaptive RAG — 三级自适应检索策略
 # ============================================================
 
@@ -239,19 +261,20 @@ def _multi_hop_infer(question: str, entities: List[dict]) -> str:
 
 async def graph_rag_qa(question: str) -> dict:
     """
-    图增强 RAG — Neo4j 持久化图谱 + 多跳推理。
+    图增强 RAG — LightRAG / Neo4j 双后端 + 多跳推理。
 
     流程：
-    1. Neo4j 可用 → 从问题提取实体 → 查询邻域子图 → 作为额外上下文
-    2. Neo4j 不可用或无实体命中 → 内存实体提取作为 fallback
+    1. 配置的图后端可用 → 从问题提取实体 → 查询邻域子图 → 作为额外上下文
+    2. 图后端不可用或无实体命中 → 内存实体提取作为 fallback
     3. 向量检索结果 + 图谱上下文 → LLM 生成
     """
-    # 1. 尝试 Neo4j 增强检索
+    # 1. 获取图后端
     graph_context = ""
     entities = []
-    neo4j_store = get_neo4j_store()
-    if neo4j_store and neo4j_store.is_available():
-        graph_context, entities = graph_enhanced_retrieve(question, neo4j_store, depth=2)
+    store, backend = _get_graph_store()
+
+    if store:
+        graph_context, entities = graph_enhanced_retrieve(question, store, depth=2)
 
     # 2. 常规向量检索
     docs = await _hybrid_search(question, k=10)
@@ -264,8 +287,8 @@ async def graph_rag_qa(question: str) -> dict:
     doc_context = _format_context(docs) if docs else ""
     if graph_context:
         full_context = doc_context + "\n\n" + graph_context
-    elif neo4j_store is None and docs:
-        # 4. Neo4j 不可用 → 原内存模式提取（兗底）
+    elif store is None and docs:
+        # 4. 无图后端 → 原内存模式提取（fallback）
         entities = _extract_entities(docs)
         graph_context = _multi_hop_infer(question, entities)
         full_context = doc_context
@@ -294,8 +317,10 @@ async def graph_rag_qa(question: str) -> dict:
         "sources": sources,
         "entities": entities[:10],
         "mode": "graphrag",
-        "graph_backend": "neo4j" if neo4j_store and neo4j_store.is_available() else "memory",
+        "graph_backend": backend,
     }
+
+
 async def smart_rag_qa(question: str) -> dict:
     """
     2026 智能 RAG 统一入口 — 自动选择最优策略。
@@ -314,31 +339,73 @@ async def smart_rag_qa(question: str) -> dict:
     level = _classify_complexity(question)
     logger.info(f"自适应 RAG: Level {level} | {question[:50]}...")
 
-    # 3. 按级别分发
-    if level == 0:
-        # 直接回答（不检索）
+    # 3. 分级超时 + 优雅降级
+    import asyncio as _asyncio
+
+    async def _run_level_0():
         llm = get_llm(temperature=0.5)
         answer = llm.invoke(question).content
-        result = {"answer": answer, "sources": [], "mode": "direct", "level": 0}
+        return {"answer": answer, "sources": [], "mode": "direct", "level": 0}
 
-    elif level == 1:
-        # 标准 RAG（单轮检索 + 缓存）
+    async def _run_level_1():
         from app.rag.retriever import rag_qa
-        result = await rag_qa(question, use_expansion=True, use_rerank=True)
-        result["mode"] = "standard"
-        result["level"] = 1
+        r = await rag_qa(question, use_expansion=True, use_rerank=True)
+        r["mode"] = "standard"
+        r["level"] = 1
+        return r
 
-    else:  # level == 2
-        # 判断用 Agentic 还是 GraphRAG
-        # 含"对比""关系""关联"等 → GraphRAG；含"验证""确认""检查" → Agentic
+    async def _run_level_2():
         if any(kw in question for kw in ["对比", "关系", "关联", "联系", "相关"]):
-            result = await graph_rag_qa(question)
+            r = await graph_rag_qa(question)
         else:
-            result = await _agentic_retrieve_and_generate(question)
-        result["level"] = 2
+            r = await _agentic_retrieve_and_generate(question)
+        r["level"] = 2
+        return r
+
+    result = None
+    try:
+        if level == 0:
+            result = await _asyncio.wait_for(_run_level_0(), timeout=8.0)
+        elif level == 1:
+            result = await _asyncio.wait_for(_run_level_1(), timeout=15.0)
+        else:  # level == 2
+            result = await _asyncio.wait_for(_run_level_2(), timeout=25.0)
+    except _asyncio.TimeoutError:
+        logger.warning(f"RAG 超时 (level={level})，尝试降级")
+        # 优雅降级：Level 2 → Level 1；Level 1/0 → 检索结果摘要
+        if level >= 2:
+            try:
+                result = await _asyncio.wait_for(_run_level_1(), timeout=10.0)
+                result["degraded"] = True
+                logger.info("Level 2 超时 → 已降级为 Level 1")
+            except _asyncio.TimeoutError:
+                pass
+        if result is None and level >= 1:
+            try:
+                from app.rag.retriever import _hybrid_search
+                docs = await _hybrid_search(question, k=5)
+                excerpts = "\n".join(
+                    f"- [{d.metadata.get('filename', '?')}] {d.page_content[:200]}"
+                    for d in docs[:3]
+                )
+                result = {
+                    "answer": f"⚠️ 检索超时，以下为部分相关内容摘要：\n\n{excerpts}",
+                    "sources": [],
+                    "mode": "degraded_timeout",
+                    "level": level,
+                    "degraded": True,
+                }
+            except Exception:
+                result = {
+                    "answer": "抱歉，当前查询量较大，请稍后重试或简化问题。",
+                    "sources": [],
+                    "mode": "degraded_timeout",
+                    "level": level,
+                    "degraded": True,
+                }
 
     # 4. 缓存非 Level 0 的结果
-    if level > 0:
+    if level > 0 and result:
         query_cache.set(question, result)
 
     return result

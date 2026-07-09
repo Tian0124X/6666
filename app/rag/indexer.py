@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import List, Callable, Optional
 from dataclasses import dataclass, field
 
+from app.config import settings
 from app.rag.loader import UniversalDocumentLoader
 from app.rag.splitter import split_documents
 from app.rag.store import add_documents, delete_by_source, get_unique_sources, get_document_count
@@ -87,11 +88,19 @@ def index_file(
         delete_by_source(abs_path)
 
         # 加载 → 分块 → 入库
-        docs = UniversalDocumentLoader.load(file_path)
+        docs = UniversalDocumentLoader.load(file_path, pdf_engine=pdf_engine)
         if not docs:
+            # 诊断：尝试获取实际解析引擎信息
+            from app.rag.mineru_loader import _mineru_available
+            actual_engine = "mineru" if (_mineru_available and pdf_engine in ("auto", "mineru")) else "pypdf2"
+            file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
             return IndexResult(
                 filename=filename, status="failed",
-                error="文档解析后无内容",
+                error=(
+                    f"文档解析后无内容 "
+                    f"(引擎: {actual_engine}, 文件大小: {file_size} bytes). "
+                    f"{'MinerU 已安装但解析失败，可能是扫描件PDF，可尝试 ocr=True' if _mineru_available else '建议安装 MinerU 增强解析: pip install magic-pdf'}"
+                ),
             )
 
         chunks = split_documents(docs)
@@ -102,8 +111,12 @@ def index_file(
             )
 
         count = add_documents(chunks)
-        # Neo4j ???????????????????
-        _try_build_graph(chunks, filename)
+        # 图谱构建改为后台线程执行，不阻塞索引 API 响应
+        import threading
+        threading.Thread(
+            target=_try_build_graph, args=(chunks, filename),
+            daemon=True,
+        ).start()
         elapsed = (time.time() - start) * 1000
 
         logger.info(f"索引完成: {filename} → {count} chunks ({elapsed:.0f}ms)")
@@ -201,19 +214,41 @@ def reindex_all(directory: str = "data/documents", pdf_engine: str = "auto") -> 
     # 清除查询缓存（避免返回旧文档结果）
     query_cache.clear()
     _invalidate_bm25_cache()
+    # 清空图谱
+    if settings.GRAPH_BACKEND == "lightrag":
+        from app.rag.lightrag_store import get_lightrag_store
+        store = get_lightrag_store()
+        if store:
+            store.clear_all()
+    elif settings.GRAPH_BACKEND == "neo4j":
+        neo4j_store = get_neo4j_store()
+        if neo4j_store and neo4j_store.is_available():
+            neo4j_store.clear_all()
     return index_directory(directory, recursive=True, force=True, pdf_engine=pdf_engine)
 
 
 def _try_build_graph(chunks, filename: str):
-    """??????? chunks ?? Neo4j ????????"""
+    """尝试对 chunks 构建图谱（GRAPH_BACKEND 配置驱动）"""
     try:
-        neo4j_store = get_neo4j_store()
-        if neo4j_store and neo4j_store.is_available():
-            entities, relations = neo4j_store.batch_extract_and_store(chunks)
-            if entities > 0:
-                logger.info(f"????: {filename} ? {entities} ??, {relations} ??")
+        # 1. LightRAG（内存极速）
+        if settings.GRAPH_BACKEND == "lightrag":
+            from app.rag.lightrag_store import get_lightrag_store
+            store = get_lightrag_store()
+            if store and store.is_available():
+                entities, relations = store.batch_extract_and_store(chunks)
+                if entities > 0:
+                    logger.info(f"LightRAG: {filename} → {entities} 实体, {relations} 关系")
+                return
+
+        # 2. Neo4j（持久化图谱）
+        if settings.GRAPH_BACKEND == "neo4j":
+            neo4j_store = get_neo4j_store()
+            if neo4j_store and neo4j_store.is_available():
+                entities, relations = neo4j_store.batch_extract_and_store(chunks)
+                if entities > 0:
+                    logger.info(f"Neo4j: {filename} → {entities} 实体, {relations} 关系")
     except Exception as e:
-        logger.warning(f"?????? ({filename}): {e}")
+        logger.warning(f"图谱构建跳过 ({filename}): {e}")
 
 
 def get_index_status() -> dict:

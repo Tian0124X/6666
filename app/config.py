@@ -77,16 +77,21 @@ class Settings:
     RAG_SEARCH_K: int = _int_env("RAG_SEARCH_K", 20)
     RAG_RERANK_TOP_N: int = _int_env("RAG_RERANK_TOP_N", 5)
     RAG_KNOWLEDGE_FAST_CHANNEL: bool = os.getenv("RAG_KNOWLEDGE_FAST_CHANNEL", "true").lower() == "true"
-    # === Neo4j (???????) ===
+    # === 图谱检索后端 ===
+    GRAPH_BACKEND: str = os.getenv("GRAPH_BACKEND", "lightrag")  # lightrag | neo4j | none
+    LIGHTRAG_PERSIST_DIR: str = os.getenv("LIGHTRAG_PERSIST_DIR", "./data/lightrag")
+
+    # === Neo4j (知识图谱持久化) ===
     NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "")
     NEO4J_ENABLED: bool = os.getenv("NEO4J_ENABLED", "false").lower() == "true"
 
 
-    # === MinerU PDF 澧炲己瑙ｆ瀽 ===
+    # === MinerU PDF 增强解析 ===
     PDF_PARSER: str = os.getenv("PDF_PARSER", "auto")
     MINERU_OCR: bool = os.getenv("MINERU_OCR", "false").lower() == "true"
+    MINERU_BACKEND: str = os.getenv("MINERU_BACKEND", "pipeline")  # pipeline | vlm-engine | hybrid-engine
 
     def validate(self) -> list[str]:
         """启动时验证关键配置。返回警告列表。"""
@@ -96,9 +101,9 @@ class Settings:
                 "LLM_API_KEY 未配置或为占位符，请设置 .env 中的 LLM_API_KEY。"
                 "LLM 调用将使用回退模式（规则引擎/Mock）。"
             )
-        if self.NEO4J_ENABLED and not self.NEO4J_PASSWORD:
+        if self.GRAPH_BACKEND == "neo4j" and self.NEO4J_ENABLED and not self.NEO4J_PASSWORD:
             warnings.append(
-                "NEO4J_ENABLED=true 但 NEO4J_PASSWORD 为空，Neo4j 连接可能失败。"
+                "GRAPH_BACKEND=neo4j + NEO4J_ENABLED=true 但 NEO4J_PASSWORD 为空，Neo4j 连接可能失败。"
             )
         if not self.MYSQL_PASSWORD:
             warnings.append("MYSQL_PASSWORD 为空，数据库连接可能失败。")

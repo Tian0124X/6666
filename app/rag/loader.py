@@ -65,7 +65,19 @@ class UniversalDocumentLoader:
         engine = resolve_pdf_engine(pdf_engine)
 
         if engine == "mineru":
-            return UniversalDocumentLoader._load_pdf_mineru(file_path)
+            docs = UniversalDocumentLoader._load_pdf_mineru(file_path)
+            # MinerU 失败(异常或无输出) -> 若是 auto 模式则回退 PyPDF2
+            if not docs:
+                if pdf_engine == "auto":
+                    logger.warning(
+                        f"MinerU 解析无输出, 回退 PyPDF2: {Path(file_path).name}"
+                    )
+                    return UniversalDocumentLoader._load_pdf_pypdf2(file_path)
+                else:
+                    logger.error(
+                        f"MinerU 解析无输出 (forced engine=mineru): {file_path}"
+                    )
+            return docs
         else:
             return UniversalDocumentLoader._load_pdf_pypdf2(file_path)
 
@@ -104,8 +116,30 @@ class UniversalDocumentLoader:
 
     @staticmethod
     def _load_pdf_pypdf2(file_path: str) -> List[Document]:
-        """使用 PyPDF2 解析 PDF（原有逻辑，增加 parser 元数据）。"""
-        from PyPDF2 import PdfReader
+        """使用 pypdf / PyPDF2 解析 PDF，自动回退。
+
+        优先使用 pypdf（PyPDF2 的维护版，CJK 支持更好），
+        不可用时回退 PyPDF2。
+        """
+        # 优先使用 pypdf（PyPDF2 的继任者，中文提取更好）
+        PdfReader = None
+        engine_name = "pypdf2"
+        for lib_name, import_path in [
+            ("pypdf", "pypdf"),
+            ("PyPDF2", "PyPDF2"),
+        ]:
+            try:
+                mod = __import__(import_path, fromlist=["PdfReader"])
+                PdfReader = mod.PdfReader
+                engine_name = lib_name
+                break
+            except ImportError:
+                continue
+
+        if PdfReader is None:
+            logger.error(f"PDF 解析失败: 未安装 pypdf 或 PyPDF2，请执行 pip install pypdf")
+            return []
+
         reader = PdfReader(file_path)
         if reader.is_encrypted:
             try:
@@ -113,6 +147,7 @@ class UniversalDocumentLoader:
             except Exception:
                 logger.warning(f"PDF 加密且无法解密: {file_path}")
                 return []
+
         docs = []
         for i, page in enumerate(reader.pages):
             try:
@@ -127,10 +162,18 @@ class UniversalDocumentLoader:
                         "filename": Path(file_path).name,
                         "page": i + 1,
                         "file_type": "pdf",
-                        "parser": "pypdf2",
+                        "parser": engine_name,
                     },
                 ))
-        logger.info(f"PDF: {file_path} → {len(docs)} 页")
+
+        if not docs:
+            logger.warning(
+                f"PDF ({engine_name}) 未提取到文本: {file_path} "
+                f"(共 {len(reader.pages)} 页) — 可能是扫描件/图片型 PDF，"
+                f"建议安装 MinerU 进行 OCR 解析: pip install magic-pdf"
+            )
+
+        logger.info(f"PDF ({engine_name}): {file_path} → {len(docs)} 页")
         return docs
 
     @staticmethod

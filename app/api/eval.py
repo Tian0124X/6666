@@ -54,6 +54,8 @@ async def run_rag_evaluation(mode: str = "fast"):
         "avg_answer_relevancy": report.avg_answer_relevancy,
         "avg_context_precision": report.avg_context_precision,
         "avg_context_recall": report.avg_context_recall,
+        "avg_answer_correctness": report.avg_answer_correctness,
+        "avg_context_entity_recall": report.avg_context_entity_recall,
         "details": [
             {
                 "id": r.question_id,
@@ -65,6 +67,12 @@ async def run_rag_evaluation(mode: str = "fast"):
                 "answer_relevancy": r.answer_relevancy,
                 "context_precision": r.context_precision,
                 "context_recall": r.context_recall,
+                "answer_correctness": r.answer_correctness,
+                "context_entity_recall": r.context_entity_recall,
+                "retrieval_latency_ms": r.retrieval_latency_ms,
+                "generation_latency_ms": r.generation_latency_ms,
+                "estimated_tokens": r.estimated_tokens,
+                "estimated_cost_cny": r.estimated_cost_cny,
             }
             for r in report.results
         ],

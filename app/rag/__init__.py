@@ -21,6 +21,7 @@ from app.rag.indexer import index_file, index_directory, reindex_all, get_index_
 from app.rag.neo4j_store import Neo4jStore, get_neo4j_store
 from app.rag.graph_retriever import graph_enhanced_retrieve
 from app.rag.graph_extractor import batch_extract_entities, extract_query_entities, build_graph_context
+from app.rag.lightrag_store import LightRAGStore, get_lightrag_store
 
 __all__ = [
     # 鏂囨。澶勭悊
@@ -46,5 +47,10 @@ __all__ = [
     "index_directory",
     "reindex_all",
     "get_index_status",
+    # 图谱存储
+    "Neo4jStore",
+    "get_neo4j_store",
+    "LightRAGStore",
+    "get_lightrag_store",
 ]
 
