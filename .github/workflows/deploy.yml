@@ -1,0 +1,123 @@
+# ==========================================
+# 企业智能办公助手平台 — CI/CD 部署
+# 触发: push master 或手动触发
+# ==========================================
+
+name: Build and Deploy to Alibaba Cloud ECS
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    # 手动触发
+
+# 同一分支并发运行 → 取消旧运行，防止竞态
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_TAG_SHORT: ${{ github.sha }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ============================================
+      # 1. 检出
+      # ============================================
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ============================================
+      # 2. 设置 Docker Buildx
+      # ============================================
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ============================================
+      # 3. 生成短 SHA
+      # ============================================
+      - name: Set short SHA
+        run: echo "IMAGE_TAG_SHORT=$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_ENV
+
+      # ============================================
+      # 4. 登录 ACR
+      # ============================================
+      - name: Login to Alibaba Cloud ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      # ============================================
+      # 5. 构建 & 推送 Backend
+      # ============================================
+      - name: Build and push backend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.backend
+          push: true
+          tags: |
+            ${{ secrets.ACR_REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/eao-backend:latest
+            ${{ secrets.ACR_REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/eao-backend:${{ env.IMAGE_TAG_SHORT }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ============================================
+      # 6. 构建 & 推送 Frontend
+      # ============================================
+      - name: Build and push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./frontend-react/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.ACR_REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/eao-frontend:latest
+            ${{ secrets.ACR_REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/eao-frontend:${{ env.IMAGE_TAG_SHORT }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ============================================
+      # 7. SSH 部署到 ECS
+      # ============================================
+      - name: Deploy to ECS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.ECS_HOST }}
+          username: ${{ secrets.ECS_USER }}
+          key: ${{ secrets.ECS_SSH_KEY }}
+          port: ${{ secrets.ECS_PORT || 22 }}
+          script: |
+            set -e
+            echo ">>> 登录 ACR..."
+            echo '${{ secrets.ACR_PASSWORD }}' | docker login -u '${{ secrets.ACR_USERNAME }}' --password-stdin '${{ secrets.ACR_REGISTRY }}'
+
+            cd /opt/eao
+
+            # 确保 compose 文件存在
+            if [ ! -f docker-compose.prod.yml ]; then
+              echo "!!! docker-compose.prod.yml 不存在，跳过部署"
+              exit 1
+            fi
+
+            echo ">>> 拉取最新镜像..."
+            docker compose -f docker-compose.prod.yml pull
+
+            echo ">>> 重启服务..."
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+            echo ">>> 清理旧镜像 (保留24h内)..."
+            docker image prune -af --filter "until=24h" || true
+
+            echo ">>> 等待服务启动..."
+            sleep 15
+            docker compose -f docker-compose.prod.yml ps
+
+            echo ">>> 健康检查..."
+            curl -sf http://localhost/api/health && echo "" && echo "✅ 部署成功!" || echo "⚠️ 健康检查未通过，请检查日志"
