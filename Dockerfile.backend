@@ -8,7 +8,9 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # -------- 系统依赖 --------
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 替换为阿里云 Debian 镜像 (国内加速)
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
