@@ -26,19 +26,6 @@ function clearAuth() {
   localStorage.removeItem("auth_user");
 }
 
-/** 检查 JWT 是否过期 (解析 payload 的 exp 字段) */
-function isTokenExpired(token: string): boolean {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return true;
-    const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
-    if (!payload.exp) return false;  // 无过期时间则信任
-    return Date.now() >= payload.exp * 1000;
-  } catch {
-    return true;
-  }
-}
-
 interface AuthStore {
   user: User | null;
   token: string | null;
@@ -52,7 +39,7 @@ interface AuthStore {
   handleOidcCallback: (code: string, state: string) => Promise<void>;
   register: (username: string, password: string, displayName: string) => Promise<void>;
   logout: () => void;
-  restore: () => void;
+  restore: () => Promise<void>;
   refreshAuth: () => Promise<boolean>;
   fetchProviders: () => Promise<void>;
 }
@@ -145,24 +132,48 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     set({ token: null, refreshToken: null, user: null, isLoggedIn: false });
   },
 
-  restore: () => {
+  restore: async () => {
     const token = localStorage.getItem("auth_token");
     const refresh = localStorage.getItem("auth_refresh") || "";
-    const user = localStorage.getItem("auth_user");
-    if (token && user && !isTokenExpired(token)) {
-      try {
-        set({ token, refreshToken: refresh, user: JSON.parse(user), isLoggedIn: true, isRestoring: false });
-      } catch {
-        clearAuth();
-        set({ isRestoring: false });
-      }
-    } else {
-      // token 过期或不存在，清除并跳到登录页
-      if (token && isTokenExpired(token)) {
-        clearAuth();
-      }
+    const cachedUser = localStorage.getItem("auth_user");
+
+    // 无 token → 直接放行到登录页
+    if (!token) {
       set({ isRestoring: false });
+      return;
     }
+
+    // 有 token → 先用缓存让 UI 立刻可渲染 (避免白屏闪烁)
+    if (cachedUser) {
+      try {
+        const u = JSON.parse(cachedUser);
+        set({ token, refreshToken: refresh, user: u, isLoggedIn: true });
+      } catch { /* ignore */ }
+    }
+
+    // 调服务端验证 token 是否真正有效 (签名 + 过期)
+    try {
+      const res = await fetch(`${API}/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const serverUser = await res.json();
+        saveAuth(token, refresh, serverUser);
+        set({ token, refreshToken: refresh, user: serverUser, isLoggedIn: true, isRestoring: false });
+        return;
+      }
+    } catch { /* 网络错误，保留缓存继续用 */ }
+
+    // token 无效 → 尝试用 refresh token 换新
+    const refreshed = await get().refreshAuth();
+    if (refreshed) {
+      set({ isRestoring: false });
+      return;
+    }
+
+    // refresh 也失败 → 彻底清除
+    clearAuth();
+    set({ token: null, refreshToken: null, user: null, isLoggedIn: false, isRestoring: false });
   },
 
   refreshAuth: async () => {

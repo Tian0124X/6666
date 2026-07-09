@@ -1,6 +1,18 @@
-import { authHeader } from "../stores/authStore";
+import { authHeader, useAuthStore } from "../stores/authStore";
 
 const BASE = "/api";
+
+/** 全局 401 拦截：清掉过期 auth 状态，下次 navigate 到 /login */
+function handleUnauthenticated() {
+  const store = useAuthStore.getState();
+  if (store.isLoggedIn) {
+    store.logout();
+    // 非侵入式跳转：如果不在 /login 页面就跳过去
+    if (window.location.pathname !== "/login") {
+      window.location.href = "/login";
+    }
+  }
+}
 
 async function request<T>(
   url: string,
@@ -21,6 +33,10 @@ async function request<T>(
       signal: controller.signal,
     });
     if (!res.ok) {
+      // 401 → token 无效 (服务重启导致 JWT_SECRET 变化等)，自动登出
+      if (res.status === 401) {
+        handleUnauthenticated();
+      }
       const err = await res.json().catch(() => ({ detail: res.statusText }));
       throw new Error(err.detail || `HTTP ${res.status}`);
     }

@@ -109,13 +109,19 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS
+# CORS — 开发 + 生产域名
+_cors_origins = [
+    "http://localhost:5173", "http://localhost:3000",
+    "http://127.0.0.1:5173", "http://127.0.0.1:3000",
+]
+# 从环境变量读取生产前端 URL (支持多个,逗号分隔)
+_frontend_url = os.getenv("FRONTEND_URL", "")
+if _frontend_url:
+    _cors_origins.extend(u.strip() for u in _frontend_url.split(",") if u.strip())
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173", "http://localhost:3000",
-        "http://127.0.0.1:5173", "http://127.0.0.1:3000",
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
