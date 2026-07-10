@@ -17,15 +17,16 @@ RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debia
 
 # -------- Python 依赖 --------
 COPY requirements.txt .
-# CPU 版 torch (~150MB)，用 +cpu 版本号精确匹配，避免 2GB CUDA 包
-# 所有包全部走阿里云镜像
-# torch CPU 版：阿里云镜像无 +cpu 包，加 extra-index 回退到 PyTorch 官方源
+
+# torch CPU 版 — 预下载到仓库根目录的 wheel，Docker 内本地安装（秒级）
+# 依赖仍走阿里云镜像，仅 torch 本体从本地装
+COPY torch-cpu.whl /tmp/torch-cpu.whl
 RUN pip install --no-cache-dir \
     -i https://mirrors.aliyun.com/pypi/simple/ \
     --trusted-host mirrors.aliyun.com \
-    --extra-index-url https://download.pytorch.org/whl/cpu \
-    --trusted-host download.pytorch.org \
-    "torch==2.13.0+cpu"
+    /tmp/torch-cpu.whl \
+    && rm /tmp/torch-cpu.whl
+
 RUN pip install --no-cache-dir \
     -i https://mirrors.aliyun.com/pypi/simple/ \
     --trusted-host mirrors.aliyun.com \
