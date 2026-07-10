@@ -61,7 +61,10 @@ export default function MonitoringPage() {
     setLoading(false);
   }, [days]);
 
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void fetchAll(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [fetchAll]);
 
   return (
     <div className="h-screen flex flex-col">

@@ -25,18 +25,31 @@ export default function LoginPage() {
   useEffect(() => {
     const code = searchParams.get("code");
     const state = searchParams.get("state");
-    if (code) {
+    if (!code) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
       setLoading(true);
       setError("");
       handleOidcCallback(code, state || "")
-        .then(() => navigate("/"))
+        .then(() => {
+          if (!cancelled) navigate("/");
+        })
         .catch((err: unknown) => {
+          if (cancelled) return;
           setError(err instanceof Error ? err.message : "SSO 登录失败");
           // 清除 URL 参数
           window.history.replaceState({}, "", "/login");
         })
-        .finally(() => setLoading(false));
-    }
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 0);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [searchParams, handleOidcCallback, navigate]);
 
   const currentProvider = providers.find((p) => p.id === activeProvider) || providers[0];

@@ -1,67 +1,66 @@
-# ====== Python 虚拟环境 (超大, 不进镜像) ======
+# Python 虚拟环境与构建产物
 .venv/
 .venv-mineru/
 venv/
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
 dist/
 build/
-*.egg
 .pytest_cache/
 htmlcov/
 .coverage
 
-# ====== Node / 前端 ======
+# 前端依赖与构建输出
 node_modules/
 frontend-react/node_modules/
 frontend-react/dist/
 frontend-react/.vite/
 
-# ====== Git & IDE ======
+# 版本控制与本地编辑器配置
 .git/
+.github/
 .gitignore
 .gitattributes
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~
 
-# ====== 环境变量 (含密钥, 绝不进镜像) ======
+# 凭据与本地配置
 .env
 .env.*
 !.env.example
+ecs-actions-key
+ecs-*.key
+ecs-*.pub
 
-# ====== 缓存目录 ======
+# 本地缓存、诊断文件与生成数据
 .deps/
 .firecrawl/
-.claude/
 .agents/
 .tmp/
-
-# ====== 测试 & 文档 ======
-tests/
-docs/
-*.md
-!README.md
-
-# ====== 运行时数据 (volume 挂载) ======
 data/
-
-# ====== Docker ======
 docker-data/
-
-# ====== 杂项 ======
-*.xlsx
-*.docx
-*.doc
+models/
+*.torch_cache
+torch-*.whl
 *.log
 *.pid
 *.tmp
 *.pickle
 
-# ====== OS ======
+# 文档、测试与示例文件
+tests/
+docs/
+*.md
+!README.md
+*.xlsx
+*.docx
+*.doc
+
+# 操作系统元数据
 .DS_Store
 Thumbs.db

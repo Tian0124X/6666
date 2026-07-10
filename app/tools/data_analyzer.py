@@ -200,13 +200,9 @@ class DataAnalyzerTool(BaseTool):
         chart_type: Optional[str] = None,
     ) -> str:
         try:
-            # 没传文件: 尝试默认示例文件
+            # 数据分析必须基于用户上传的文件，避免将示例数据带入生产环境。
             if not file_path:
-                demo = "data/documents/商品数据明细_豆包AI生成.xlsx"
-                if os.path.exists(demo):
-                    file_path = demo
-                else:
-                    return "❌ 请先上传数据文件 (Excel/CSV)，或使用智能对话中的 📊 按钮上传后直接提问。"
+                return "❌ 请先上传数据文件 (Excel/CSV)，或使用智能对话中的 📊 按钮上传后直接提问。"
 
             # 安全校验
             safe_path = validate_file_path(file_path)

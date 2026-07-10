@@ -9,11 +9,32 @@ import {
   ResponsiveContainer, BarChart, Bar, Legend,
 } from "recharts";
 
+interface AnalyticsOverview {
+  today: {
+    dau: number;
+    requests: number;
+    success_rate: number;
+    avg_latency_ms: number;
+    errors: number;
+  };
+}
+
+interface KnowledgeStats {
+  rag_queries_today: number;
+  cache_hit_rate: number;
+}
+
+interface PerformanceStats {
+  p50: number;
+  p95: number;
+  p99: number;
+}
+
 export default function AnalyticsPage() {
-  const [overview, setOverview] = useState<Record<string, unknown> | null>(null);
+  const [overview, setOverview] = useState<AnalyticsOverview | null>(null);
   const [trends, setTrends] = useState<Record<string, unknown>[]>([]);
-  const [knowledgeData, setKnowledgeData] = useState<Record<string, unknown> | null>(null);
-  const [perfData, setPerfData] = useState<Record<string, unknown> | null>(null);
+  const [knowledgeData, setKnowledgeData] = useState<KnowledgeStats | null>(null);
+  const [perfData, setPerfData] = useState<PerformanceStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState(7);
 
@@ -26,17 +47,20 @@ export default function AnalyticsPage() {
         analyticsApi.knowledge().catch(() => null),
         analyticsApi.performance().catch(() => null),
       ]);
-      setOverview(ov as unknown as Record<string, unknown>);
+      setOverview(ov);
       setTrends(tr.trends || []);
-      setKnowledgeData(kn as Record<string, unknown> | null);
-      setPerfData(pf as Record<string, unknown> | null);
+      setKnowledgeData(kn);
+      setPerfData(pf);
     } catch { /* ignore */ }
     setLoading(false);
   }, [days]);
 
-  useEffect(() => { fetch(); }, [fetch]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void fetch(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [fetch]);
 
-  const today = (overview?.today || {}) as Record<string, unknown>;
+  const today = overview?.today;
 
   return (
     <div className="h-screen flex flex-col">
@@ -64,11 +88,11 @@ export default function AnalyticsPage() {
             <>
               {/* Stats */}
               <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-                <StatCard icon={<Users />} label="DAU" value={String(today.dau || 0)} />
-                <StatCard icon={<Activity />} label="今日请求" value={String(today.requests || 0)} />
-                <StatCard icon={<TrendingUp />} label="成功率" value={`${today.success_rate || 0}%`} />
-                <StatCard icon={<Clock />} label="平均延迟" value={`${today.avg_latency_ms || 0}ms`} />
-                <StatCard icon={<AlertTriangle />} label="错误数" value={String(today.errors || 0)} />
+                <StatCard icon={<Users />} label="DAU" value={String(today?.dau ?? 0)} />
+                <StatCard icon={<Activity />} label="今日请求" value={String(today?.requests ?? 0)} />
+                <StatCard icon={<TrendingUp />} label="成功率" value={`${today?.success_rate ?? 0}%`} />
+                <StatCard icon={<Clock />} label="平均延迟" value={`${today?.avg_latency_ms ?? 0}ms`} />
+                <StatCard icon={<AlertTriangle />} label="错误数" value={String(today?.errors ?? 0)} />
               </div>
 
               {/* Trend Chart */}
@@ -100,11 +124,11 @@ export default function AnalyticsPage() {
                     <div className="grid grid-cols-2 gap-4 text-sm">
                       <div>
                         <p className="text-[var(--color-muted-foreground)]">今日 RAG 查询</p>
-                        <p className="text-2xl font-bold">{(knowledgeData as any).rag_queries_today ?? "--"}</p>
+                        <p className="text-2xl font-bold">{knowledgeData.rag_queries_today ?? "--"}</p>
                       </div>
                       <div>
                         <p className="text-[var(--color-muted-foreground)]">缓存命中率</p>
-                        <p className="text-2xl font-bold">{((knowledgeData as any).cache_hit_rate != null) ? `${Math.round((knowledgeData as any).cache_hit_rate * 100)}%` : "--"}</p>
+                        <p className="text-2xl font-bold">{knowledgeData.cache_hit_rate != null ? `${Math.round(knowledgeData.cache_hit_rate * 100)}%` : "--"}</p>
                       </div>
                     </div>
                   ) : (
@@ -120,15 +144,15 @@ export default function AnalyticsPage() {
                     <div className="grid grid-cols-3 gap-3 text-sm">
                       <div>
                         <p className="text-[var(--color-muted-foreground)]">P50</p>
-                        <p className="text-lg font-bold">{(perfData as any).p50 ?? "--"} ms</p>
+                        <p className="text-lg font-bold">{perfData.p50 ?? "--"} ms</p>
                       </div>
                       <div>
                         <p className="text-[var(--color-muted-foreground)]">P95</p>
-                        <p className="text-lg font-bold">{(perfData as any).p95 ?? "--"} ms</p>
+                        <p className="text-lg font-bold">{perfData.p95 ?? "--"} ms</p>
                       </div>
                       <div>
                         <p className="text-[var(--color-muted-foreground)]">P99</p>
-                        <p className="text-lg font-bold">{(perfData as any).p99 ?? "--"} ms</p>
+                        <p className="text-lg font-bold">{perfData.p99 ?? "--"} ms</p>
                       </div>
                     </div>
                   ) : (

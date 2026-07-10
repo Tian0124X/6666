@@ -1,5 +1,5 @@
-@import "tailwindcss";
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap');
+@import "tailwindcss";
 
 @theme {
   --color-primary: #2563eb;
@@ -20,7 +20,7 @@
   --color-card: #ffffff;
   --color-card-foreground: #0f172a;
 
-  /* === Knowledge page design tokens === */
+  /* 知识库页面设计令牌 */
   --color-kb-bg: #FAF8F5;
   --color-kb-card: #ffffff;
   --color-kb-accent: #1A8A7D;
@@ -52,7 +52,7 @@
   --color-card: #1e293b;
   --color-card-foreground: #f1f5f9;
 
-  /* Knowledge dark mode */
+  /* 知识库深色模式 */
   --color-kb-bg: #0A1628;
   --color-kb-card: #0F1F35;
   --color-kb-accent: #2A9D8F;

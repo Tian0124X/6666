@@ -2,6 +2,19 @@ import { authHeader, useAuthStore } from "../stores/authStore";
 
 const BASE = "/api";
 
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null && "detail" in error) {
+    const detail = (error as { detail?: unknown }).detail;
+    if (typeof detail === "string") return detail;
+  }
+  return fallback;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
 /** 全局 401 拦截：清掉过期 auth 状态，下次 navigate 到 /login */
 function handleUnauthenticated() {
   const store = useAuthStore.getState();
@@ -37,13 +50,15 @@ async function request<T>(
       if (res.status === 401) {
         handleUnauthenticated();
       }
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail || `HTTP ${res.status}`);
+      const errorPayload: unknown = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(getErrorMessage(errorPayload, `HTTP ${res.status}`));
     }
     return res.json();
-  } catch (e: any) {
-    if (e.name === "AbortError") throw new Error("请求超时，请重试");
-    throw e;
+  } catch (error: unknown) {
+    if (isAbortError(error)) {
+      throw new Error("请求超时，请重试", { cause: error });
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -285,11 +300,11 @@ export const knowledgeApi = {
           } catch { /* skip */ }
         }
         if (!hadError) onDone();
-      } catch (e: any) {
-        if (e.name !== "AbortError") onError(e.message);
+      } catch (error: unknown) {
+        if (!isAbortError(error)) onError(getErrorMessage(error, "知识问答请求失败"));
       }
-    }).catch((e) => {
-      if (e.name !== "AbortError") onError(e.message);
+    }).catch((error: unknown) => {
+      if (!isAbortError(error)) onError(getErrorMessage(error, "知识问答请求失败"));
     });
 
     return controller;

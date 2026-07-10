@@ -1,4 +1,4 @@
-# Python
+# Python 运行环境与构建产物
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -8,54 +8,64 @@ build/
 venv/
 *.egg
 
-# IDE
+# 编辑器配置
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 
-# Environment
+# 环境变量与密钥
 .env
 .env.local
 .env.production
 
-# Data
+# 运行时数据
 data/documents/*
 data/reports/*
 data/chroma/*
 data/checkpoints.db
+data/lightrag/*
+data/mineru_test_output/
 !data/documents/.gitkeep
 !data/reports/.gitkeep
 !data/chroma/.gitkeep
+!data/lightrag/.gitkeep
 
-# Docker
+# Docker 数据目录
 docker-data/
 
-# OS
+# 操作系统文件
 .DS_Store
 Thumbs.db
 
-# Jupyter
+# Jupyter 缓存
 .ipynb_checkpoints/
 
-# pytest
+# 测试缓存与覆盖率报告
 .pytest_cache/
 htmlcov/
 .coverage
 
-# Dependencies (vendored)
+# 本地依赖缓存
 .deps/
 
-# Downloads / temp
+# 下载文件与临时文件
 torch-*.whl
 =4.0.0
 *.torch_cache
+.tmp/
+.firecrawl/
+.venv-mineru/
+*_test_result.txt
+uvicorn_out.txt
 
-# SSH keys (credentials)
+# SSH 密钥与凭据
+ecs-actions-key
 ecs-*.key
 ecs-*.pub
 
-# Model cache (large binary files)
+# 模型缓存（大型二进制文件）
 models/
 *.safetensors
 *.bin

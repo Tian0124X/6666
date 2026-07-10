@@ -1,5 +1,6 @@
 import { useState, useRef } from "react";
 import { Send, Square, ImagePlus, FileSpreadsheet, Loader2, X } from "lucide-react";
+import { knowledgeApi } from "../lib/api";
 
 interface Props {
   onSend: (msg: string) => void;
@@ -67,7 +68,6 @@ export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, di
     setUploadProgress(0);
     setUploadStatus("uploading");
     try {
-      const { knowledgeApi } = await import("../lib/api");
       const res = await knowledgeApi.upload(file, (pct) => {
         setUploadProgress(pct);
       });

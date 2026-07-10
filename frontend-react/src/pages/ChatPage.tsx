@@ -4,6 +4,7 @@ import { ChatInput } from "../components/ChatInput";
 import { useChatStore } from "../stores/chatStore";
 import type { ChatMessage } from "../stores/chatStore";
 import { streamChat } from "../lib/api";
+import { authHeader } from "../stores/authStore";
 import { Sparkles, Trash2 } from "lucide-react";
 import { StarRating } from "../components/StarRating";
 import { ApprovalDialog } from "../components/ApprovalDialog";
@@ -38,7 +39,6 @@ export default function ChatPage() {
     let mounted = true;
     const interval = setInterval(async () => {
       try {
-        const { authHeader } = await import("../stores/authStore");
         const res = await fetch("/api/chat/approvals", { headers: { ...authHeader() } });
         const data = await res.json();
         if (mounted && data.pending) setApproval(data.approval);

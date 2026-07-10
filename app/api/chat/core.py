@@ -145,16 +145,9 @@ async def _handle_data_channel(req, user, memory, intent, file_path):
         ).replace('用户问题:', '').strip()
         route_label = "data_fast"
     else:
-        demo = "data/documents/商品数据明细_豆包AI生成.xlsx"
-        if os.path.exists(demo):
-            target_file = demo
-            user_question = req.message
-            route_label = "data_fallback"
-            yield f"data: {json.dumps({'status': '未检测到上传文件，正在使用示例数据...'}, ensure_ascii=False)}\n\n"
-        else:
-            yield f"data: {json.dumps({'content': '请先上传 Excel/CSV 数据文件再提问。点击输入框左侧的 📊 按钮上传。'}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'done': True})}\n\n"
-            return
+        yield f"data: {json.dumps({'content': '请先上传 Excel/CSV 数据文件再提问。点击输入框左侧的 📊 按钮上传。'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'done': True})}\n\n"
+        return
 
     logger.info(f"数据通道: file={target_file}, question={user_question[:80]}")
     yield f"data: {json.dumps({'status': '正在分析数据...'}, ensure_ascii=False)}\n\n"

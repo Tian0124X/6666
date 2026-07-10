@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { toolsApi } from "../lib/api";
+import { knowledgeApi, toolsApi } from "../lib/api";
 import {
   BarChart3, FileSpreadsheet, ClipboardCheck, Users,
   Upload, Loader2, Play, MessageCircle, Send, Code2,
@@ -114,7 +114,6 @@ export default function ToolsPage() {
     if (!f) return;
     setChatUploading(true);
     try {
-      const { knowledgeApi } = await import("../lib/api");
       const res = await knowledgeApi.upload(f);
       const uploadedName = res.filename || f.name;
       const safeName = uploadedName.replace(/\.\./g, '').replace(/[\\/]/g, '');
@@ -326,7 +325,6 @@ export default function ToolsPage() {
                       const f = e.target.files?.[0]; if (!f) return;
                       setFile(f); setUploading(true);
                       try {
-                        const { knowledgeApi } = await import("../lib/api");
                         const res = await knowledgeApi.upload(f);
                         const safeName = (res.filename || f.name).replace(/\.\./g, '').replace(/[\\/]/g, '');
                         setFilePath(`data/documents/${safeName}`);

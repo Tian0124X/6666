@@ -11,14 +11,16 @@ import {
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 
-// crypto.randomUUID 在 HTTP 下不可用
+// crypto.randomUUID 在 HTTP 下不可用，使用随机字节生成 UUID。
 function uuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  return (([1e7] as any) + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, (c: string) =>
-    (parseInt(c) ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> parseInt(c) / 4).toString(16)
-  );
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /* ========================================================================
@@ -165,8 +167,11 @@ export default function KnowledgePage() {
   }, []);
 
   useEffect(() => {
-    fetchDocs();
-    fetchDiag();
+    const timer = window.setTimeout(() => {
+      void fetchDocs();
+      void fetchDiag();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [fetchDocs, fetchDiag]);
 
   /* Poll indexing status for files in progress */
@@ -244,7 +249,7 @@ export default function KnowledgePage() {
             m.id === assistantId
               ? {
                   ...m,
-                  sources: (data.sources || []).map((s: any) => ({
+                  sources: (data.sources || []).map((s) => ({
                     filename: s.filename || "",
                     excerpt: s.excerpt || "",
                   })),
@@ -320,8 +325,9 @@ export default function KnowledgePage() {
     setUploadMsg("");
     setUploadProgress(0);
     try {
-      const res: any = await knowledgeApi.upload(file, (pct: number) => setUploadProgress(pct));
-      setUploadMsg(`✅ ${res.message || "上传成功"}`);
+      const res = await knowledgeApi.upload(file, (pct: number) => setUploadProgress(pct));
+      const message = typeof res.message === "string" ? res.message : "上传成功";
+      setUploadMsg(`✅ ${message}`);
       addToast("success", `文件 "${file.name}" 已上传，正在后台索引...`);
       setIndexingFiles((prev) => {
         const next = new Map(prev);

@@ -1,78 +1,60 @@
-# 企业智能办公助手平台
+# 企业智能办公助手
 
-基于 **LangGraph + DeepSeek** 的 Multi-Agent 智能办公平台。集成对话、RAG 知识问答、数据分析、OA/CRM、SSO 认证、多模态分析。
+基于 FastAPI、LangGraph 和 React 的企业智能办公平台，提供智能对话、知识库检索、数据分析、OA/CRM 查询和 SSO 集成。
 
-## 技术栈
+## 入口与环境
 
-| 层级 | 技术 |
-|------|------|
-| Agent | LangGraph 1.2 + LangChain 1.3 |
-| LLM | DeepSeek (Chat / Reasoner) |
-| 后端 | FastAPI + Redis + MySQL + ChromaDB/pgvector |
-| 前端 | React 18 + Vite + Tailwind v4 + Zustand |
-| 检索 | BGE-Small-ZH + BGE-Reranker-v2-m3 + BM25 + RRF |
-| 认证 | JWT + LDAP + OAuth2/OIDC |
+| 使用场景 | 主要文件 | 说明 |
+| --- | --- | --- |
+| 本地开发 | `docker-compose.local.yml`、`scripts/setup-local.ps1` | 仅启动 Redis、MySQL、PostgreSQL 和 ChromaDB；后端、前端在本机热更新。 |
+| 线上部署 | `docker-compose.prod.yml`、`Dockerfile.backend`、`frontend-react/Dockerfile` | ECS 上运行的完整容器栈。 |
+| 持续部署 | `.github/workflows/deploy.yml`、`scripts/server-init.sh`、`scripts/server-deploy.sh` | 推送 `master` 后通过 GitHub Actions 部署到 ECS。 |
+| 应用代码 | `main.py`、`app/`、`frontend-react/` | FastAPI 后端与 React 前端。 |
 
-## 快速开始
+详细操作见 [本地开发](docs/local-development.md) 与 [生产部署](docs/deployment.md)。
 
-```bash
-cp .env.example .env          # 填入 LLM_API_KEY
-docker-compose up -d redis mysql chromadb
-pip install -r requirements.txt
-python main.py                # → http://localhost:8000
-cd frontend-react && npm install && npm run dev  # → http://localhost:5173
+## 本地启动
+
+```powershell
+Copy-Item .env.example .env
+# 编辑 .env，填入 LLM_API_KEY 等必要配置
+powershell -ExecutionPolicy Bypass -File scripts/setup-local.ps1
 ```
 
-默认账户: `admin` / `admin123` · `demo` / `demo123`
+或手动启动：
+
+```powershell
+docker compose -f docker-compose.local.yml up -d
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
+Set-Location frontend-react
+npm ci
+npm run dev
+```
+
+- 后端：http://localhost:8000
+- API 文档：http://localhost:8000/docs
+- 前端：http://localhost:5173
 
 ## 项目结构
 
-```
-├── main.py                    # 唯一入口
-├── app/
-│   ├── agent/                 # LangGraph 引擎 (双路径 + 多Agent + 审批)
-│   ├── rag/                   # RAG 检索 (混合检索 + Reranker + 三级RAG)
-│   ├── tools/                 # 6 工具 (数据分析/OA/CRM/知识库/搜索/图片)
-│   ├── auth/                  # SSO (LDAP + OIDC)
-│   ├── api/                   # 6 路由模块
-│   ├── memory/                # 三级记忆 (Redis/本地/MySQL)
-│   └── eval/                  # 自动化评测
-├── frontend-react/            # React 前端 (8 页面)
-└── tests/                     # pytest
+```text
+app/                 FastAPI 业务模块（Agent、RAG、认证、工具等）
+frontend-react/      React 前端和 Nginx 生产镜像
+scripts/             本地初始化、模型下载、ECS 初始化与部署脚本
+data/                运行时上传文件、报告与索引（不提交版本库）
+tests/               后端自动化测试
+docs/                架构、开发和部署文档
 ```
 
-## 项目亮点
+## 常用检查
 
-- **本地规则优先** — 路由分类 + 多Agent 分解 90%+ 走本地规则，省 LLM Token 60%
-- **BGE Reranker** — Cross-Encoder 本地推理 ~100ms，替代 20 次串行 LLM API
-- **自适应查询扩展** — 按问题复杂度 1/2/3 变体，简单问题不浪费检索
-- **异步审批** — asyncio.Event 非阻塞等待，不卡事件循环
-- **语义缓存** — 精确匹配 + 向量余弦相似度 (>0.92)，相似问题命中
-- **对话压缩** — 长对话自动 LLM 摘要，省 60-70% 上下文 Token
-- **模型预热** — lifespan 后台线程预加载，首次请求不阻塞
-- **三合一认证** — 本地 + LDAP + OIDC 混合模式，动态 Provider
-- **双向量后端** — pgvector (HNSW) + ChromaDB 自动回退
-- **令牌桶限流** — 30 req/s 按 IP，健康检查免限
-
-## 核心功能
-
-- **智能对话** — LangGraph 双路径 + bind_tools + SSE 流式
-- **RAG 问答** — BM25+向量+RRF → BGE Reranker → 反幻觉 → 来源追溯
-- **多 Agent** — Supervisor → 4 Agent asyncio.gather 并行
-- **数据分析** — Excel/CSV → 统计 → 图表 → Word 报告
-- **企业 SSO** — 本地 + LDAP + OIDC 三合一
-- **多模态** — 图片 OCR → LLM 分析
-- **速率限制** — 令牌桶 30 req/s
-
-## 环境变量
-
-```bash
-LLM_API_KEY=sk-xxx              # DeepSeek (必填)
-HF_ENDPOINT=https://hf-mirror.com  # 国内镜像
-LDAP_ENABLED=false              # 企业域认证
-OIDC_ENABLED=false              # 单点登录
+```powershell
+pytest
+Set-Location frontend-react
+npm run lint
+npm run build
 ```
 
-## License
-
-MIT
+默认演示账户：`admin` / `admin123`，`demo` / `demo123`。生产环境请在首次部署后立即修改默认凭据和所有 `.env` 密钥。

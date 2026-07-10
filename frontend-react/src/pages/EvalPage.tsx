@@ -70,8 +70,11 @@ export default function EvalPage() {
     } catch { /* ignore */ }
   }, []);
 
-  // 页面加载时自动获取总览
-  useEffect(() => { fetchSummary(); }, [fetchSummary]);
+  // 页面加载后异步获取总览，避免在 Effect 中同步更新状态。
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void fetchSummary(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [fetchSummary]);
 
   return (
     <div className="h-screen flex flex-col">

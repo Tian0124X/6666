@@ -98,15 +98,16 @@ interface ChatStore {
   _switchAbort: AbortController | null;
 }
 
-// crypto.randomUUID 在 HTTP 下不可用，使用 crypto.getRandomValues 替代
+// crypto.randomUUID 在 HTTP 下不可用，使用随机字节生成 UUID。
 function uuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  // fallback: crypto.getRandomValues (HTTP 下也可用)
-  return (([1e7] as any) + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, (c: string) =>
-    (parseInt(c) ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> parseInt(c) / 4).toString(16)
-  );
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 const MAX_MESSAGES = 500;
@@ -303,9 +304,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set({ messages: msgs });
       // 刷新缓存
       if (msgs.length > 0) _cacheMessages(sessionId, msgs);
-    } catch (e: any) {
-      if (e.name === "AbortError") return; // 被取消，正常
-      console.warn("加载会话消息失败:", e);
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === "AbortError") return; // 被取消，正常
+      console.warn("加载会话消息失败:", error);
       // API 失败时保留缓存数据不丢失
     }
   },
