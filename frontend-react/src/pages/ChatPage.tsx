@@ -5,7 +5,7 @@ import { useChatStore } from "../stores/chatStore";
 import type { ChatMessage } from "../stores/chatStore";
 import { streamChat } from "../lib/api";
 import { authHeader } from "../stores/authStore";
-import { Sparkles, Trash2 } from "lucide-react";
+import { Sparkles, Trash2, BookOpen } from "lucide-react";
 import { StarRating } from "../components/StarRating";
 import { ApprovalDialog } from "../components/ApprovalDialog";
 
@@ -27,6 +27,7 @@ export default function ChatPage() {
   const [approval, setApproval] = useState<{ thread_id: string; action: string; description: string; details: Record<string,unknown> } | null>(null);
   const [dataFilePath, setDataFilePath] = useState("");
   const [dataFileName, setDataFileName] = useState("");
+  const [mode, setMode] = useState<"auto" | "rag">("auto");
 
   // 确保有活跃会话 (首次加载或会话被删后自动创建)
   useEffect(() => {
@@ -89,7 +90,7 @@ export default function ChatPage() {
       setStreaming(true);
 
       const ctrl = streamChat(
-        { message: sendText, session_id: activeSessionId, with_chart: true },
+        { message: sendText, session_id: activeSessionId, with_chart: true, mode },
         (chunk) => updateLastAssistant(chunk),
         () => {
           setShowRating(true);
@@ -166,7 +167,7 @@ export default function ChatPage() {
       );
       abortRef.current = ctrl;
     },
-    [addMessage, setStreaming, updateLastAssistant, activeSessionId, dataFilePath, dataFileName]
+    [addMessage, setStreaming, updateLastAssistant, activeSessionId, dataFilePath, dataFileName, mode]
   );
 
   const handleStop = () => {
@@ -191,6 +192,11 @@ export default function ChatPage() {
         <div className="flex items-center gap-3">
           <Sparkles className="w-5 h-5 text-primary" />
           <h2 className="font-semibold text-foreground">智能对话</h2>
+          {mode === "rag" && (
+            <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-primary/10 text-primary">
+              <BookOpen className="w-3 h-3" /> 知识库问答
+            </span>
+          )}
           {isStreaming && (
             <span className="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary animate-pulse">
               生成中...
@@ -250,6 +256,8 @@ export default function ChatPage() {
         onDataFile={(filePath, fileName) => { setDataFilePath(filePath); setDataFileName(fileName); }}
         dataFileName={dataFileName}
         onClearDataFile={() => { setDataFilePath(""); setDataFileName(""); }}
+        mode={mode}
+        onModeChange={setMode}
         onImage={(file, question, answer) => {
           addMessage({
             role: "user",

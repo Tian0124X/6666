@@ -1,5 +1,7 @@
 """请求体 Pydantic 模型"""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -12,6 +14,10 @@ class ChatRequest(BaseModel):
         description="[DEPRECATED] 用户 ID 现在从 Bearer token 推导，此字段被忽略。保留以兼容旧客户端。"
     )
     with_chart: bool = Field(default=True, description="是否生成图表（数据对话专用）")
+    mode: Literal["auto", "rag"] = Field(
+        default="auto",
+        description="对话模式：auto 自动路由，rag 强制知识库检索",
+    )
 
 
 class KnowledgeQARequest(BaseModel):

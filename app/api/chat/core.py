@@ -103,11 +103,13 @@ async def chat_stream(req: ChatRequest, user: UserInfo = Depends(require_user)):
             return
 
         # ─── RAG 快速通道 ─────────────────────────────────────────────────────
-        if (
+        # 手动选择知识库问答时强制进入 RAG；自动模式仍按意图识别决定。
+        should_use_rag = req.mode == "rag" or (
             intent.primary == Intent.KNOWLEDGE_QA
             and intent.confidence >= 0.85
             and settings.RAG_KNOWLEDGE_FAST_CHANNEL
-        ):
+        )
+        if should_use_rag:
             consumed = False
             async for chunk in _handle_rag_fast_channel(req, user, memory):
                 consumed = True
@@ -181,46 +183,6 @@ async def _handle_data_channel(req, user, memory, intent, file_path):
         except Exception as e:
             logger.error(f"自动报告生成失败: {e}", exc_info=True)
             yield f"data: {json.dumps({'content': f'\n\n⚠️ 报告生成失败: {e}'}, ensure_ascii=False)}\n\n"
-
-
-async def _handle_rag_fast_channel(req, user, memory):
-    """RAG 快速通道 — 高置信度知识问题直调 smart_rag_qa。
-
-    异步生成器：成功时 yield SSE 片段，失败时 yield 0 个片段（调用方据此降级 Agent）。
-    """
-    from app.rag.advanced import smart_rag_qa
-
-    try:
-        history = memory.get_history(req.session_id, user.username)
-        rag_query = req.message
-        if history:
-            recent = history[-6:]
-            ctx_lines = [f"{m.role}: {m.content}" for m in recent]
-            context = "\n".join(ctx_lines)
-            rag_query = f"对话历史：\n{context}\n\n用户最新问题：{req.message}"
-
-        rag_result = await smart_rag_qa(rag_query)
-        rag_answer = rag_result.get("answer", "")
-
-        # 成功后才推送状态（避免失败时出现悬空提示）
-        yield f"data: {json.dumps({'status': '📚 检索知识库完成'}, ensure_ascii=False)}\n\n"
-
-        for para in rag_answer.split('\n'):
-            if para.strip():
-                yield f"data: {json.dumps({'content': para + chr(10)}, ensure_ascii=False)}\n\n"
-
-        yield f"data: {json.dumps({'type': 'knowledge_result', 'sources': rag_result.get('sources', []), 'mode': rag_result.get('mode', 'standard'), 'level': rag_result.get('level', -1), 'from_cache': rag_result.get('from_cache', False)}, ensure_ascii=False)}\n\n"
-        yield f"data: {json.dumps({'done': True})}\n\n"
-
-        await memory.add_message(req.session_id, user.username, "user", req.message)
-        await memory.add_message(req.session_id, user.username, "assistant", rag_answer)
-
-        from app.api.analytics import track_event
-        track_event("chat_end", user.username, req.session_id, {"has_answer": True, "route": "rag_fast"})
-
-    except Exception as e:
-        logger.warning(f"RAG 快速通道失败，降级 Agent: {e}")
-        # 不 yield 任何内容 → 调用方 consumed=False → 降级 Agent
 
 
 async def _handle_agent_channel(req, user, memory):
@@ -334,7 +296,8 @@ async def _handle_agent_channel(req, user, memory):
 
 
 async def _handle_rag_fast_channel(req, user, memory):
-    """知识库快速通道：将真实 RAG token 直接转为聊天 SSE。"""
+    """知识库快速通道：使用当前会话历史生成答案并写入统一记忆。"""
+    import asyncio as _asyncio
     from app.rag.retriever import rag_qa_stream
 
     history = memory.get_history(req.session_id, user.username)
@@ -364,6 +327,12 @@ async def _handle_rag_fast_channel(req, user, memory):
         await memory.add_message(req.session_id, user.username, "user", req.message)
         if answer:
             await memory.add_message(req.session_id, user.username, "assistant", answer)
+
+        # RAG 问答与普通对话使用同一会话记忆，并触发摘要与用户事实提取。
+        updated_history = memory.get_history(req.session_id, user.username)
+        if updated_history and len(updated_history) >= 4:
+            _asyncio.create_task(H.memory_hooks(req.session_id, user.username, updated_history))
+
         from app.api.analytics import track_event
         track_event("chat_end", user.username, req.session_id, {"has_answer": bool(answer), "route": "rag_fast"})
     except Exception as exc:

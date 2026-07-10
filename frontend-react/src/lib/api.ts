@@ -66,7 +66,7 @@ async function request<T>(
 
 /** SSE 流式请求 — 用于对话流式输出 */
 export function streamChat(
-  body: { message: string; session_id?: string; user_id?: string; with_chart?: boolean },
+  body: { message: string; session_id?: string; user_id?: string; with_chart?: boolean; mode?: "auto" | "rag" },
   onChunk: (text: string) => void,
   onDone: () => void,
   onError: (err: string) => void,

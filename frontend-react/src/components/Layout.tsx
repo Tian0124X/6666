@@ -8,7 +8,6 @@ import {
   Beaker,
   Clock,
   MessageSquare,
-  Wrench,
   BookOpen,
   Settings,
   Sun,
@@ -28,8 +27,7 @@ import {
 const nav = [
   { to: "/", icon: MessageSquare, label: "智能对话" },
   { to: "/history", icon: Clock, label: "会话历史" },
-  { to: "/tools", icon: Wrench, label: "工具测试" },
-  { to: "/knowledge", icon: BookOpen, label: "知识库" },
+  { to: "/knowledge", icon: BookOpen, label: "知识库管理" },
   { to: "/monitoring", icon: Activity, label: "监控面板" },
   { to: "/analytics", icon: Zap, label: "深度分析" },
   { to: "/eval", icon: Beaker, label: "自动化评测" },

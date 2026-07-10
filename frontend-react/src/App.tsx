@@ -4,7 +4,6 @@ import { Layout } from "./components/Layout";
 import { useThemeStore } from "./stores/themeStore";
 import { useAuthStore } from "./stores/authStore";
 import ChatPage from "./pages/ChatPage";
-import ToolsPage from "./pages/ToolsPage";
 import KnowledgePage from "./pages/KnowledgePage";
 import MonitoringPage from "./pages/MonitoringPage";
 import EvalPage from "./pages/EvalPage";
@@ -63,7 +62,6 @@ export default function App() {
         >
           <Route index element={<ChatPage />} />
           <Route path="history" element={<HistoryPage />} />
-          <Route path="tools" element={<ToolsPage />} />
           <Route path="knowledge" element={<KnowledgePage />} />
           <Route path="monitoring" element={<MonitoringPage />} />
           <Route path="eval" element={<EvalPage />} />

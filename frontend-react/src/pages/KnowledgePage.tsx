@@ -1,44 +1,18 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { knowledgeApi } from "../lib/api";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   BookOpen, Upload, Trash2, Loader2, FileText, RefreshCw,
-  Activity, Zap, FileUp, Search, X, CheckCircle2,
-  AlertTriangle, Clock, Database, GitGraph, Brain, Circle,
-  HardDrive, Cpu, BarChart3, ChevronRight, ChevronDown,
-  ArrowUp, Sparkles, Layers, Share2, Plus,
+  Activity, FileUp, Search, X, CheckCircle2,
+  AlertTriangle, Clock, Database, GitGraph, Circle,
+  HardDrive, Cpu, BarChart3, Sparkles, Layers, Share2, Plus,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
-
-// crypto.randomUUID 在 HTTP 下不可用，使用随机字节生成 UUID。
-function uuid(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
 
 /* ========================================================================
    Types
    ======================================================================== */
 
 type Tab = "qa" | "docs" | "graph";
-
-interface ChatMsg {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  sources?: { filename: string; excerpt: string }[];
-  mode?: string;
-  level?: number;
-  fromCache?: boolean;
-  iterations?: number;
-}
 
 interface ToastItem {
   id: string;
@@ -76,20 +50,6 @@ interface DocEntry {
 
 const PIE_COLORS = ["#1A8A7D", "#D4952B", "#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b", "#06b6d4", "#84cc16", "#f97316", "#6366f1"];
 
-const MODE_CONFIG: Record<string, { icon: string; label: string; color: string }> = {
-  direct:   { icon: "⚡", label: "直接回答",  color: "bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950 dark:text-sky-300 dark:border-sky-800" },
-  standard: { icon: "📖", label: "标准 RAG",  color: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800" },
-  agentic:  { icon: "🔄", label: "Agentic",  color: "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950 dark:text-purple-300 dark:border-purple-800" },
-  graphrag: { icon: "🕸️", label: "GraphRAG", color: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-800" },
-};
-
-const SUGGESTED_QUESTIONS = [
-  { icon: "📋", text: "公司年假政策是什么？" },
-  { icon: "📊", text: "帮我总结最近的销售数据" },
-  { icon: "💰", text: "最新的报销流程是怎样的？" },
-  { icon: "📝", text: "员工入职需要准备哪些材料？" },
-];
-
 const ALLOWED_EXTS = ".pdf,.docx,.xlsx,.xls,.txt,.csv";
 const ALLOWED_EXT_LIST = ["pdf", "docx", "xlsx", "xls", "txt", "csv"];
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
@@ -105,13 +65,9 @@ let toastIdCounter = 0;
    ======================================================================== */
 
 export default function KnowledgePage() {
-  const [tab, setTab] = useState<Tab>("qa");
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [input, setInput] = useState("");
+  // 知识问答已合并到主对话页；此页只保留知识库管理与图谱查看。
+  const [tab, setTab] = useState<Tab>("docs");
   const [loading, setLoading] = useState(false);
-  const [streamStatus, setStreamStatus] = useState("");  // SSE 实时状态文字
-  const abortRef = useRef<AbortController | null>(null);  // 取消流式请求
-  const chatEndRef = useRef<HTMLDivElement>(null);
 
   /* Upload state */
   const [file, setFile] = useState<File | null>(null);
@@ -204,96 +160,6 @@ export default function KnowledgePage() {
 
     return () => clearInterval(timer);
   }, [indexingFiles, fetchDocs, fetchDiag, addToast]);
-
-  /* Scroll chat to bottom */
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  /* =====================================================================
-     Handlers — Q&A
-     ===================================================================== */
-
-  const handleAsk = () => {
-    const q = input.trim();
-    if (!q || loading) return;
-
-    // 取消上一次未完成的请求
-    abortRef.current?.abort();
-
-    const userMsg: ChatMsg = { id: uuid(), role: "user", content: q };
-    const assistantId = uuid();
-    // 占位消息：初始为空，流式追加内容
-    const assistantMsg: ChatMsg = { id: assistantId, role: "assistant", content: "" };
-    setMessages((prev) => [...prev, userMsg, assistantMsg]);
-    setInput("");
-    setLoading(true);
-    setStreamStatus("正在分析问题...");
-
-    const controller = knowledgeApi.streamSmartQa(
-      q,
-      // onStatus
-      (status) => setStreamStatus(status),
-      // onChunk — 逐段追加到占位消息
-      (text) => {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId ? { ...m, content: m.content + text } : m
-          )
-        );
-      },
-      // onData — 完成后设置元数据
-      (data) => {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId
-              ? {
-                  ...m,
-                  sources: (data.sources || []).map((s) => ({
-                    filename: s.filename || "",
-                    excerpt: s.excerpt || "",
-                  })),
-                  mode: data.mode,
-                  level: data.level,
-                  fromCache: data.from_cache,
-                  iterations: data.iterations,
-                }
-              : m
-          )
-        );
-      },
-      // onDone
-      () => {
-        setLoading(false);
-        setStreamStatus("");
-        abortRef.current = null;
-      },
-      // onError
-      (err) => {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId && !m.content
-              ? { ...m, content: `❌ 查询失败: ${err}` }
-              : m
-          )
-        );
-        setLoading(false);
-        setStreamStatus("");
-        abortRef.current = null;
-        addToast("error", `知识问答失败: ${err}`);
-      },
-    );
-
-    abortRef.current = controller;
-  };
-
-  /** 停止当前流式生成 */
-  const handleStop = () => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setLoading(false);
-    setStreamStatus("");
-  };
 
   /* =====================================================================
      Handlers — Upload
@@ -393,109 +259,6 @@ export default function KnowledgePage() {
   /* ====================================================================
      Sub-components — defined BEFORE render to avoid TDZ ReferenceError
      ==================================================================== */
-
-  /* ---- Q&A Panel ---- */
-  const qaPanel = (
-      <>
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-6 py-6">
-          {messages.length === 0 ? (
-            /* Empty state */
-            <div className="flex flex-col items-center justify-center h-full max-w-lg mx-auto text-center space-y-6">
-              <div className="w-20 h-20 rounded-2xl bg-kb-surface flex items-center justify-center">
-                <Brain className="w-10 h-10 text-kb-accent" />
-              </div>
-              <div className="space-y-1.5">
-                <h3 className="text-lg font-semibold text-kb-ink dark:text-white"
-                  style={{ fontFamily: "var(--font-display)" }}>
-                  向知识库提问
-                </h3>
-                <p className="text-sm text-kb-muted">
-                  基于已上传的企业文档，AI 会检索相关内容并给出带来源标注的回答。
-                </p>
-              </div>
-              <div className="grid grid-cols-2 gap-2 w-full">
-                {SUGGESTED_QUESTIONS.map((q) => (
-                  <button
-                    key={q.text}
-                    onClick={() => setInput(q.text)}
-                    className="flex items-center gap-2 text-left px-4 py-3 rounded-xl bg-kb-card border border-kb-border
-                               hover:border-kb-accent hover:shadow-sm transition-all duration-200 group"
-                  >
-                    <span className="text-base shrink-0">{q.icon}</span>
-                    <span className="text-xs text-kb-muted group-hover:text-kb-ink dark:group-hover:text-white leading-relaxed line-clamp-2">
-                      {q.text}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            /* Chat messages */
-            <div className="max-w-4xl mx-auto space-y-5">
-              {messages.map((msg) => (
-                <ChatMessage key={msg.id} msg={msg} />
-              ))}
-              {loading && <TypingIndicator status={streamStatus} />}
-              <div ref={chatEndRef} />
-            </div>
-          )}
-        </div>
-
-        {/* Input bar */}
-        <div className="shrink-0 border-t border-kb-border bg-kb-card px-6 py-4">
-          <div className="flex gap-3 max-w-4xl mx-auto">
-            <div className="flex-1 relative">
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAsk(); }
-                }}
-                placeholder="输入问题，按 Enter 发送..."
-                className="w-full px-4 py-3 pr-10 rounded-xl border border-kb-border bg-kb-bg text-sm
-                           text-kb-ink dark:text-white placeholder:text-kb-muted
-                           focus:ring-2 focus:ring-kb-accent/30 focus:border-kb-accent focus:outline-none
-                           transition-all duration-200"
-                disabled={loading}
-              />
-              {input && (
-                <button
-                  onClick={() => setInput("")}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded-md text-kb-muted hover:text-kb-ink dark:hover:text-white transition-colors"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-            {loading ? (
-              <button
-                onClick={handleStop}
-                className="flex items-center gap-2 px-5 py-3 rounded-xl bg-red-500 text-white font-medium text-sm
-                           hover:bg-red-600 transition-all duration-200 active:scale-[0.97] shadow-sm"
-              >
-                <X className="w-4 h-4" />
-                停止
-              </button>
-            ) : (
-              <button
-                onClick={handleAsk}
-                disabled={!input.trim()}
-                className="flex items-center gap-2 px-5 py-3 rounded-xl bg-kb-accent text-white font-medium text-sm
-                           hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed
-                           transition-all duration-200 active:scale-[0.97] shadow-sm"
-              >
-                <ArrowUp className="w-4 h-4" />
-                发送
-              </button>
-            )}
-          </div>
-          <p className="text-[10px] text-kb-muted mt-2 text-center max-w-4xl mx-auto">
-            按 Enter 发送 · AI 回答基于已索引文档，请核实关键信息
-          </p>
-        </div>
-      </>
-  );
 
   /* ---- Documents Panel ---- */
   const docsPanel = (
@@ -894,7 +657,6 @@ export default function KnowledgePage() {
             {/* Tab switcher — pill style */}
             <div className="flex bg-kb-surface rounded-xl p-1 gap-0.5">
               {([
-                { key: "qa" as Tab, icon: Zap, label: "知识问答" },
                 { key: "docs" as Tab, icon: Layers, label: "文档管理" },
                 { key: "graph" as Tab, icon: Share2, label: "图谱概览" },
               ]).map(({ key, icon: Icon, label }) => (
@@ -962,7 +724,6 @@ export default function KnowledgePage() {
           Content Area
           ================================================================ */}
       <div className="flex-1 overflow-hidden flex flex-col">
-        {tab === "qa" && qaPanel}
         {tab === "docs" && docsPanel}
         {tab === "graph" && graphPanel}
       </div>
@@ -999,124 +760,6 @@ export default function KnowledgePage() {
 /* ========================================================================
    Sub-components (standalone, outside KnowledgePage)
    ======================================================================== */
-
-/* Chat message bubble */
-function ChatMessage({ msg }: { msg: ChatMsg }) {
-  const [sourcesOpen, setSourcesOpen] = useState(false);
-  const isUser = msg.role === "user";
-  const modeInfo = msg.mode ? MODE_CONFIG[msg.mode] : null;
-
-  return (
-    <div className={`flex gap-3 ${isUser ? "flex-row-reverse" : ""}`}>
-      {/* Avatar */}
-      <div
-        className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 shadow-sm ${
-          isUser ? "bg-kb-accent" : "bg-kb-surface border border-kb-border"
-        }`}
-      >
-        {isUser ? (
-          <span className="text-xs text-white font-medium">U</span>
-        ) : (
-          <Brain className="w-4 h-4 text-kb-accent" />
-        )}
-      </div>
-
-      {/* Bubble */}
-      <div
-        className={`max-w-[75%] rounded-2xl px-4 py-3 space-y-2 ${
-          isUser
-            ? "bg-kb-accent text-white rounded-tr-md"
-            : "bg-kb-card border border-kb-border rounded-tl-md shadow-sm"
-        }`}
-      >
-        {/* Content */}
-        {isUser ? (
-          <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-        ) : (
-          <div className="space-y-3">
-            {msg.content && (
-              <div className="prose prose-sm max-w-none dark:prose-invert prose-p:leading-relaxed prose-a:text-kb-accent">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-              </div>
-            )}
-
-            {/* Badges row */}
-            {(modeInfo || msg.fromCache || (msg.level !== undefined && msg.level >= 0)) && (
-              <div className="flex items-center gap-1.5 flex-wrap">
-                {modeInfo && (
-                  <span className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border ${modeInfo.color}`}>
-                    {modeInfo.icon} {modeInfo.label}
-                  </span>
-                )}
-                {msg.fromCache && (
-                  <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-800">
-                    💾 缓存命中
-                  </span>
-                )}
-                {msg.level !== undefined && msg.level >= 0 && (
-                  <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border bg-slate-50 text-slate-600 border-slate-200 dark:bg-slate-900 dark:text-slate-400 dark:border-slate-700">
-                    Lv.{msg.level}
-                  </span>
-                )}
-                {msg.iterations && msg.iterations > 1 && (
-                  <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border bg-purple-50 text-purple-600 border-purple-200 dark:bg-purple-950 dark:text-purple-300 dark:border-purple-800">
-                    {msg.iterations} 轮迭代
-                  </span>
-                )}
-              </div>
-            )}
-
-            {/* Sources */}
-            {msg.sources && msg.sources.length > 0 && (
-              <div className="border-t border-kb-border pt-2">
-                <button
-                  onClick={() => setSourcesOpen(!sourcesOpen)}
-                  className="flex items-center gap-1.5 text-xs text-kb-muted hover:text-kb-accent transition-colors"
-                >
-                  {sourcesOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                  📚 {msg.sources.length} 个参考来源
-                </button>
-                {sourcesOpen && (
-                  <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
-                    {msg.sources.map((s, i) => (
-                      <div key={i} className="text-xs bg-kb-surface rounded-lg px-3 py-2">
-                        <span className="font-medium text-kb-ink dark:text-white">[{i + 1}] {s.filename || "未知来源"}</span>
-                        {s.excerpt && (
-                          <p className="text-kb-muted mt-0.5 leading-relaxed line-clamp-2">{s.excerpt}</p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* Typing indicator */
-function TypingIndicator({ status }: { status?: string }) {
-  return (
-    <div className="flex gap-3">
-      <div className="w-8 h-8 rounded-xl bg-kb-surface border border-kb-border flex items-center justify-center shadow-sm">
-        <Brain className="w-4 h-4 text-kb-accent" />
-      </div>
-      <div className="bg-kb-card border border-kb-border rounded-2xl rounded-tl-md px-4 py-3 shadow-sm">
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-kb-muted">{status || "正在检索知识库"}</span>
-          <span className="flex gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-kb-accent animate-bounce [animation-delay:0ms]" />
-            <span className="w-1.5 h-1.5 rounded-full bg-kb-accent animate-bounce [animation-delay:150ms]" />
-            <span className="w-1.5 h-1.5 rounded-full bg-kb-accent animate-bounce [animation-delay:300ms]" />
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /* Diagnostics item */
 function DiagItem({ label, value, ok }: { label: string; value: string; ok?: boolean }) {

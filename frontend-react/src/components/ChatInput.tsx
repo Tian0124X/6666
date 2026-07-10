@@ -1,5 +1,5 @@
 import { useState, useRef } from "react";
-import { Send, Square, ImagePlus, FileSpreadsheet, Loader2, X } from "lucide-react";
+import { Send, Square, ImagePlus, FileSpreadsheet, Loader2, X, BookOpen, MessageSquare } from "lucide-react";
 import { knowledgeApi } from "../lib/api";
 
 interface Props {
@@ -11,9 +11,11 @@ interface Props {
   disabled?: boolean;
   dataFileName?: string;
   onClearDataFile?: () => void;
+  mode: "auto" | "rag";
+  onModeChange: (mode: "auto" | "rag") => void;
 }
 
-export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, disabled, dataFileName, onClearDataFile }: Props) {
+export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, disabled, dataFileName, onClearDataFile, mode, onModeChange }: Props) {
   const [input, setInput] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -109,6 +111,30 @@ export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, di
 
   return (
     <div className="border-t border-border bg-card p-4">
+      <div className="max-w-4xl mx-auto mb-3 flex items-center gap-1 rounded-lg bg-muted p-1 w-fit">
+        <button
+          type="button"
+          onClick={() => onModeChange("auto")}
+          disabled={isStreaming}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${
+            mode === "auto" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <MessageSquare className="w-3.5 h-3.5" />
+          智能对话
+        </button>
+        <button
+          type="button"
+          onClick={() => onModeChange("rag")}
+          disabled={isStreaming}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${
+            mode === "rag" ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <BookOpen className="w-3.5 h-3.5" />
+          知识库问答
+        </button>
+      </div>
       {/* Data file indicator */}
       {dataFileName && (
         <div className="max-w-4xl mx-auto mb-2 flex items-center gap-2 px-1">
@@ -166,7 +192,7 @@ export function ChatInput({ onSend, onImage, onDataFile, onStop, isStreaming, di
               handleSubmit();
             }
           }}
-          placeholder="输入问题或上传图片分析... (Enter 发送)"
+          placeholder={mode === "rag" ? "基于知识库提问... (Enter 发送)" : "输入问题或上传图片分析... (Enter 发送)"}
           disabled={disabled}
           className="flex-1 px-4 py-3 rounded-xl border border-input bg-background text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
         />
