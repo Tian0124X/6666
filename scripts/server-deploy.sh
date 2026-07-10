@@ -31,14 +31,14 @@ fi
 # ============================================
 log_step "1/4 构建 Backend 镜像 (约 5-15 分钟)"
 cd /opt/eao/build
-docker build -f Dockerfile.backend -t eao/eao-backend:latest .
+DOCKER_BUILDKIT=0 docker build -f Dockerfile.backend -t eao/eao-backend:latest .
 log_info "Backend 镜像构建完成"
 
 # ============================================
 # 2. 构建 Frontend 镜像
 # ============================================
 log_step "2/4 构建 Frontend 镜像 (约 2-5 分钟)"
-docker build -t eao/eao-frontend:latest frontend-react/
+DOCKER_BUILDKIT=0 docker build -t eao/eao-frontend:latest frontend-react/
 log_info "Frontend 镜像构建完成"
 
 # ============================================

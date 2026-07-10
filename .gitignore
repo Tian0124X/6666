@@ -42,3 +42,11 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Dependencies (vendored)
+.deps/
+
+# Downloads / temp
+torch-*.whl
+=4.0.0
+*.torch_cache
