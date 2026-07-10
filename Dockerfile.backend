@@ -15,8 +15,14 @@ RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debia
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# -------- Python 依赖 (分层缓存) --------
+# -------- Python 依赖 --------
 COPY requirements.txt .
+# CPU 版 torch (~150MB)，用 +cpu 版本号精确匹配，避免 2GB CUDA 包
+# 所有包全部走阿里云镜像
+RUN pip install --no-cache-dir \
+    -i https://mirrors.aliyun.com/pypi/simple/ \
+    --trusted-host mirrors.aliyun.com \
+    "torch==2.13.0+cpu"
 RUN pip install --no-cache-dir \
     -i https://mirrors.aliyun.com/pypi/simple/ \
     --trusted-host mirrors.aliyun.com \
