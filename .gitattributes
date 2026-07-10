@@ -1,0 +1,2 @@
+# Shell scripts must use LF on all platforms (breaks on Linux with CRLF)
+*.sh text eol=lf
