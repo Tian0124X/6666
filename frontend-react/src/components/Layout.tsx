@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useThemeStore } from "../stores/themeStore";
 import { useAuthStore } from "../stores/authStore";
-import { useChatStore, type SessionSummary } from "../stores/chatStore";
+import { useChatStore } from "../stores/chatStore";
 import {
   Activity,
   Beaker,

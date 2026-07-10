@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useAuthStore, type AuthProvider } from "../stores/authStore";
+import { useAuthStore } from "../stores/authStore";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Bot, LogIn, UserPlus, Loader2, Building2, Shield } from "lucide-react";
 

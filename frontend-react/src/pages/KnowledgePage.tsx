@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   BookOpen, Upload, Trash2, Loader2, FileText, RefreshCw,
-  Send, Activity, Zap, FileUp, Search, X, CheckCircle2,
+  Activity, Zap, FileUp, Search, X, CheckCircle2,
   AlertTriangle, Clock, Database, GitGraph, Brain, Circle,
   HardDrive, Cpu, BarChart3, ChevronRight, ChevronDown,
   ArrowUp, Sparkles, Layers, Share2, Plus,

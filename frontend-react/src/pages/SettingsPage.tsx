@@ -3,7 +3,7 @@ import { useThemeStore } from "../stores/themeStore";
 import { Settings, Moon, Sun } from "lucide-react";
 
 export default function SettingsPage() {
-  const { theme, toggle, setTheme } = useThemeStore();
+  const { theme, setTheme } = useThemeStore();
   const [model, setModel] = useState(() => {
     try { return localStorage.getItem("settings_model") || "deepseek-chat"; }
     catch { return "deepseek-chat"; }

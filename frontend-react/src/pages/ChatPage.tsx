@@ -16,9 +16,7 @@ export default function ChatPage() {
     addMessage,
     updateLastAssistant,
     setStreaming,
-    clearMessages,
     createSession,
-    switchSession,
     ensureSession,
   } = useChatStore();
 

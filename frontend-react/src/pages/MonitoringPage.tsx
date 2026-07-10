@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { authHeader } from "../stores/authStore";
 import {
-  Activity, TrendingUp, Clock, AlertTriangle,
-  Star, RefreshCw, Users, Brain, Wrench,
+  Activity, TrendingUp, AlertTriangle,
+  Star, RefreshCw, Users, Brain,
 } from "lucide-react";
 import {
-  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend,
+  LineChart, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, PieChart, Pie, Cell,
 } from "recharts";
 
 interface OverviewData {
@@ -151,7 +151,7 @@ export default function MonitoringPage() {
                     <PieChart>
                       <Pie
                         data={Object.entries(knowledge.top_tools).map(([name, count]) => ({ name, value: count }))}
-                        dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                        dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80} label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}
                       >
                         {Object.keys(knowledge.top_tools).map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
                       </Pie>

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { useChatStore, type SessionSummary } from "../stores/chatStore";
+import { useChatStore } from "../stores/chatStore";
 import { authHeader } from "../stores/authStore";
 import {
   MessageSquare, Search, Trash2, Clock, RefreshCw,
@@ -23,7 +23,6 @@ export default function HistoryPage() {
   const {
     sessions,
     sessionsLoaded,
-    activeSessionId,
     loadSessions,
     switchSession,
     deleteSession,

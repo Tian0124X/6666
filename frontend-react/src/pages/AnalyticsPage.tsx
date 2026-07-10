@@ -5,7 +5,7 @@ import {
   Clock, TrendingUp, AlertTriangle,
 } from "lucide-react";
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, BarChart, Bar, Legend,
 } from "recharts";
 
