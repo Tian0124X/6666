@@ -17,12 +17,13 @@ log_step()  { echo -e "\n${BLUE}=== $* ===${NC}"; }
 # ============================================
 log_step "0/4 预下载 PyTorch CPU wheel (约 17 秒)"
 cd /opt/eao/build
-if [ -f torch-cpu.whl ]; then
+TORCH_WHEEL="torch-2.13.0+cpu-cp312-cp312-manylinux_2_28_x86_64.whl"
+if [ -f "$TORCH_WHEEL" ]; then
     log_info "wheel 已存在，跳过下载"
 else
-    curl -L -o torch-cpu.whl \
+    curl -L -o "$TORCH_WHEEL" \
         "https://download.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl"
-    log_info "torch-cpu.whl 下载完成 ($(du -h torch-cpu.whl | cut -f1))"
+    log_info "$TORCH_WHEEL 下载完成 ($(du -h "$TORCH_WHEEL" | cut -f1))"
 fi
 
 # ============================================

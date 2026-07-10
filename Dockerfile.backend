@@ -20,12 +20,13 @@ COPY requirements.txt .
 
 # torch CPU 版 — 预下载到仓库根目录的 wheel，Docker 内本地安装（秒级）
 # 依赖仍走阿里云镜像，仅 torch 本体从本地装
-COPY torch-cpu.whl /tmp/torch-cpu.whl
+# 宿主机预下载，文件名遵循 PEP 427 (torch-2.13.0+cpu-cp312-*.whl)
+COPY torch-2.13.0+cpu-*.whl /tmp/
 RUN pip install --no-cache-dir \
     -i https://mirrors.aliyun.com/pypi/simple/ \
     --trusted-host mirrors.aliyun.com \
-    /tmp/torch-cpu.whl \
-    && rm /tmp/torch-cpu.whl
+    /tmp/torch-2.13.0+cpu-*.whl \
+    && rm /tmp/torch-2.13.0+cpu-*.whl
 
 RUN pip install --no-cache-dir \
     -i https://mirrors.aliyun.com/pypi/simple/ \
