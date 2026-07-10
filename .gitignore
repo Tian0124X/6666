@@ -42,3 +42,6 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+
+# PyTorch wheel (downloaded during deploy)
+torch-*.whl
