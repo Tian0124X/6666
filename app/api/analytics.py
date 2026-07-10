@@ -58,7 +58,7 @@ class AnalyticsTracker:
         """获取当前内存统计 (实时)"""
         return {
             "dau": len(self._daily_active_users),
-            "hourly_activity": dict(sorted(self._hourly_activity.items()))[-24:],
+            "hourly_activity": dict(sorted(self._hourly_activity.items())[-24:]),
             "total_events": sum(self._hourly_activity.values()),
         }
 
