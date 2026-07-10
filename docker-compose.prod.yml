@@ -142,10 +142,10 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    volumes:
-      # HTTPS 证书挂载 (certbot 产出后挂载)
-      - /etc/letsencrypt:/etc/letsencrypt:ro
-      - ./nginx-ssl.conf:/etc/nginx/conf.d/default.conf:ro  # HTTPS 配置时启用
+    # HTTPS volumes (certbot 产出后取消下面注释)
+      # - /etc/letsencrypt:/etc/letsencrypt:ro
+      # - ./nginx-ssl.conf:/etc/nginx/conf.d/default.conf:ro
+    volumes: []
     depends_on:
       - backend
     restart: always
