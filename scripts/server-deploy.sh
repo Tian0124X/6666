@@ -38,7 +38,7 @@ log_info "Backend 镜像构建完成"
 # 2. 构建 Frontend 镜像
 # ============================================
 log_step "2/4 构建 Frontend 镜像 (约 2-5 分钟)"
-docker build -f frontend-react/Dockerfile -t eao/eao-frontend:latest .
+docker build -t eao/eao-frontend:latest frontend-react/
 log_info "Frontend 镜像构建完成"
 
 # ============================================
