@@ -11,6 +11,16 @@ import {
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 
+// crypto.randomUUID 在 HTTP 下不可用
+function uuid(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return (([1e7] as any) + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, (c: string) =>
+    (parseInt(c) ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> parseInt(c) / 4).toString(16)
+  );
+}
+
 /* ========================================================================
    Types
    ======================================================================== */
@@ -206,8 +216,8 @@ export default function KnowledgePage() {
     // 取消上一次未完成的请求
     abortRef.current?.abort();
 
-    const userMsg: ChatMsg = { id: crypto.randomUUID(), role: "user", content: q };
-    const assistantId = crypto.randomUUID();
+    const userMsg: ChatMsg = { id: uuid(), role: "user", content: q };
+    const assistantId = uuid();
     // 占位消息：初始为空，流式追加内容
     const assistantMsg: ChatMsg = { id: assistantId, role: "assistant", content: "" };
     setMessages((prev) => [...prev, userMsg, assistantMsg]);

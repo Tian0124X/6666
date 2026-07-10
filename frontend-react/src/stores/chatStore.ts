@@ -98,7 +98,18 @@ interface ChatStore {
   _switchAbort: AbortController | null;
 }
 
-const MAX_MESSAGES = 500; // 从 100 提升到 500，避免长对话丢失
+// crypto.randomUUID 在 HTTP 下不可用，使用 crypto.getRandomValues 替代
+function uuid(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  // fallback: crypto.getRandomValues (HTTP 下也可用)
+  return (([1e7] as any) + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, (c: string) =>
+    (parseInt(c) ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> parseInt(c) / 4).toString(16)
+  );
+}
+
+const MAX_MESSAGES = 500;
 
 // ====== localStorage 缓存 (L1 快速层) ======
 
@@ -186,7 +197,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   addMessage: (msg) =>
     set((s) => {
-      const msgs = [...s.messages.slice(-(MAX_MESSAGES - 1)), { ...msg, id: crypto.randomUUID() }];
+      const msgs = [...s.messages.slice(-(MAX_MESSAGES - 1)), { ...msg, id: uuid() }];
       // 仅增加计数，不覆盖 (避免 switchSession 后重置)
       const sessions = s.sessions.map((ss) =>
         ss.session_id === s.activeSessionId
@@ -280,7 +291,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         (m: { role: string; content: string; metadata?: Record<string, unknown> }) => {
           const dr = m.metadata ? _metadataToDataResult(m.metadata) : undefined;
           return {
-            id: crypto.randomUUID(),
+            id: uuid(),
             role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
             content: m.content || "",
             metadata: m.metadata,

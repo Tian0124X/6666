@@ -77,6 +77,8 @@ class Settings:
     RAG_SEARCH_K: int = _int_env("RAG_SEARCH_K", 20)
     RAG_RERANK_TOP_N: int = _int_env("RAG_RERANK_TOP_N", 5)
     RAG_KNOWLEDGE_FAST_CHANNEL: bool = os.getenv("RAG_KNOWLEDGE_FAST_CHANNEL", "true").lower() == "true"
+    RAG_EMBEDDING_MODEL: str = os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-m3")
+    RAG_EMBEDDING_DIMENSION: int = _int_env("RAG_EMBEDDING_DIMENSION", 1024)
     # === 图谱检索后端 ===
     GRAPH_BACKEND: str = os.getenv("GRAPH_BACKEND", "lightrag")  # lightrag | neo4j | none
     LIGHTRAG_PERSIST_DIR: str = os.getenv("LIGHTRAG_PERSIST_DIR", "./data/lightrag")

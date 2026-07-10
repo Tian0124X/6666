@@ -12,7 +12,9 @@
 """
 
 import asyncio
+import hashlib
 import logging
+import time
 from typing import List, Tuple, Optional
 from langchain_core.documents import Document
 from langchain_community.retrievers import BM25Retriever
@@ -53,7 +55,8 @@ def _reciprocal_rank_fusion(
                 doc_id = f"{source}#{chunk_id}"
             else:
                 # 回退：内容前 200 字符
-                doc_id = f"fallback:{hash(doc.page_content[:200])}"
+                digest = hashlib.sha1(doc.page_content[:200].encode("utf-8")).hexdigest()
+                doc_id = f"fallback:{digest}"
 
             score = 1.0 / (k + rank + 1)
             if doc_id in doc_scores:
@@ -377,18 +380,19 @@ def _get_reranker():
             model_name = "BAAI/bge-reranker-v2-m3"
             logger.info(f"正在加载重排序模型: {model_name}...")
 
-            # 优先本地缓存，避免 HuggingFace 网络超时
-            # 尝试顺序: 纯离线 → 国内镜像 → 直连（默认）
+            # 优先本地文件，避免 HuggingFace 网络超时
+            # 尝试顺序: 本地路径 → 离线缓存 → 国内镜像
+            local_path = f"/root/.cache/huggingface/local_models/{model_name}"
             loaded = None
-            for strategy, env in [
-                ("local_cache", {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}),
-                ("hf_mirror", {"HF_ENDPOINT": os.getenv("HF_ENDPOINT", "https://hf-mirror.com")}),
-                ("direct", {}),
+            for strategy, cfg in [
+                ("local_path", {"model_name_or_path": local_path}),
+                ("local_cache", {"model_name_or_path": model_name, "env": {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}}),
+                ("hf_mirror", {"model_name_or_path": model_name, "env": {"HF_ENDPOINT": os.getenv("HF_ENDPOINT", "https://hf-mirror.com")}}),
             ]:
                 try:
-                    for k, v in env.items():
+                    for k, v in cfg.get("env", {}).items():
                         os.environ.setdefault(k, v)
-                    loaded = FlagReranker(model_name, use_fp16=True)
+                    loaded = FlagReranker(cfg["model_name_or_path"], use_fp16=True)
 
                     # --- transformers >=5.0 兼容补丁: prepare_for_model / encode_plus 已移除 ---
                     # FlagEmbedding 1.4.x 调用 prepare_for_model(token_ids, pair_ids, ...)
@@ -401,7 +405,7 @@ def _get_reranker():
                     break
                 except Exception as e:
                     logger.debug(f"Reranker 加载失败 ({strategy}): {e}")
-                    if strategy == "direct":
+                    if strategy == "hf_mirror":
                         raise
 
             _reranker_model = loaded if loaded is not None else False
@@ -429,8 +433,8 @@ def _cross_encoder_rerank(question: str, docs: List[Document], top_n: int = 5) -
 
     reranker = _get_reranker()
     if reranker is None:
-        # 降级: LLM pointwise
-        return _llm_rerank_fallback(question, docs, top_n)
+        # 逐文档调用 LLM 会把一次问答放大为多次远程请求，速度优先时保留融合排序。
+        return docs[:top_n]
 
     try:
         # 构建 (query, doc) 对
@@ -453,8 +457,8 @@ def _cross_encoder_rerank(question: str, docs: List[Document], top_n: int = 5) -
         return top_docs
 
     except Exception as e:
-        logger.warning(f"Cross-Encoder 重排序失败，降级 LLM: {e}")
-        return _llm_rerank_fallback(question, docs, top_n)
+        logger.warning(f"Cross-Encoder 重排序失败，保留融合排序: {e}")
+        return docs[:top_n]
 
 
 def _llm_rerank_fallback(question: str, docs: List[Document], top_n: int = 5) -> List[Document]:
@@ -614,7 +618,7 @@ def _generate_answer(question: str, docs: List[Document]) -> Tuple[str, List[dic
 # 5. 主入口 — 完整 RAG 链路
 # ============================================================
 
-async def rag_qa(
+async def _legacy_rag_qa(
     question: str,
     k: int = 5,
     use_expansion: bool = True,
@@ -670,3 +674,145 @@ async def rag_qa(
         "sources": sources,
         "retrieved_count": len(all_docs),
     }
+
+
+async def _expand_queries_async(question: str) -> List[str]:
+    """只扩展复杂问题，并通过异步调用避免阻塞 FastAPI 事件循环。"""
+    if not settings.is_llm_available or _estimate_question_complexity(question) < 2:
+        return [question]
+
+    prompt = ChatPromptTemplate.from_template(
+        """为同一个问题生成三个不同表述的检索查询。
+保持原始意图不变，每行一个查询，不要编号。
+
+问题：{question}"""
+    )
+    try:
+        result = await (prompt | get_llm(temperature=0.2, timeout=10)).ainvoke(
+            {"question": question}
+        )
+        queries = [line.strip("- ").strip() for line in result.content.splitlines() if line.strip()]
+        if question not in queries:
+            queries.insert(0, question)
+        return queries[:4]
+    except Exception as exc:
+        logger.warning("Query expansion failed; using original query: %s", exc)
+        return [question]
+
+
+async def _retrieve_final_documents(
+    question: str,
+    k: int,
+    use_expansion: bool,
+    use_rerank: bool,
+) -> tuple[List[Document], int, dict[str, float], int]:
+    """执行检索阶段，返回文档和各阶段耗时。"""
+    timings: dict[str, float] = {}
+    started = time.perf_counter()
+
+    expansion_started = time.perf_counter()
+    queries = await _expand_queries_async(question) if use_expansion else [question]
+    timings["expansion"] = round((time.perf_counter() - expansion_started) * 1000, 1)
+
+    retrieval_started = time.perf_counter()
+    fetch_k = max(20, k) if use_rerank else k
+    result_lists = await asyncio.gather(*[_hybrid_search(query, k=fetch_k) for query in queries])
+    all_docs = _reciprocal_rank_fusion(list(result_lists))
+    timings["retrieval"] = round((time.perf_counter() - retrieval_started) * 1000, 1)
+
+    rerank_started = time.perf_counter()
+    if use_rerank and len(all_docs) > k:
+        final_docs = await asyncio.to_thread(_cross_encoder_rerank, question, all_docs, k)
+    else:
+        final_docs = all_docs[:k]
+    timings["rerank"] = round((time.perf_counter() - rerank_started) * 1000, 1)
+    timings["total_retrieval"] = round((time.perf_counter() - started) * 1000, 1)
+    return final_docs, len(all_docs), timings, len(queries)
+
+
+async def _generate_answer_async(question: str, docs: List[Document]) -> tuple[str, List[dict]]:
+    """将同步 SDK 调用移出应用事件循环。"""
+    return await asyncio.to_thread(_generate_answer, question, docs)
+
+
+async def rag_qa(
+    question: str,
+    k: int = 5,
+    use_expansion: bool = True,
+    use_rerank: bool = True,
+) -> dict:
+    """标准 RAG 入口：非阻塞执行，并返回阶段耗时。"""
+    started = time.perf_counter()
+    docs, retrieved_count, timings, query_count = await _retrieve_final_documents(
+        question, k, use_expansion, use_rerank
+    )
+    if not docs:
+        timings["total"] = round((time.perf_counter() - started) * 1000, 1)
+        return {
+            "answer": "知识库中没有找到与问题相关的资料。",
+            "sources": [],
+            "retrieved_count": 0,
+            "query_count": query_count,
+            "timings_ms": timings,
+        }
+
+    generation_started = time.perf_counter()
+    answer, sources = await _generate_answer_async(question, docs)
+    timings["generation"] = round((time.perf_counter() - generation_started) * 1000, 1)
+    timings["total"] = round((time.perf_counter() - started) * 1000, 1)
+    logger.info("RAG timing ms: %s", timings)
+    return {
+        "answer": answer,
+        "sources": sources,
+        "retrieved_count": retrieved_count,
+        "query_count": query_count,
+        "timings_ms": timings,
+    }
+
+
+async def rag_qa_stream(question: str, k: int = 5):
+    """先输出检索元数据，再按真实 LLM token 输出回答。"""
+    started = time.perf_counter()
+    docs, retrieved_count, timings, query_count = await _retrieve_final_documents(
+        question, k, use_expansion=False, use_rerank=True
+    )
+    sources = build_sources(docs)
+    yield {
+        "type": "retrieval",
+        "sources": sources,
+        "retrieved_count": retrieved_count,
+        "query_count": query_count,
+        "timings_ms": timings,
+    }
+
+    if not docs:
+        timings["total"] = round((time.perf_counter() - started) * 1000, 1)
+        yield {"type": "content", "content": "知识库中没有找到与问题相关的资料。"}
+        yield {"type": "done", "sources": [], "timings_ms": timings}
+        return
+
+    if not settings.is_llm_available:
+        answer, _ = await _generate_answer_async(question, docs)
+        timings["total"] = round((time.perf_counter() - started) * 1000, 1)
+        yield {"type": "content", "content": answer}
+        yield {"type": "done", "sources": sources, "timings_ms": timings}
+        return
+
+    generation_started = time.perf_counter()
+    chain = ChatPromptTemplate.from_messages([
+        ("system", RAG_SYSTEM_PROMPT),
+        ("user", RAG_USER_PROMPT),
+    ]) | get_llm(temperature=0.1)
+    try:
+        async for chunk in chain.astream({"context": _format_context(docs), "question": question}):
+            content = getattr(chunk, "content", "")
+            if content:
+                yield {"type": "content", "content": content}
+    except Exception as exc:
+        logger.warning("RAG stream generation failed: %s", exc)
+        answer, _ = await _generate_answer_async(question, docs)
+        yield {"type": "content", "content": answer}
+
+    timings["generation"] = round((time.perf_counter() - generation_started) * 1000, 1)
+    timings["total"] = round((time.perf_counter() - started) * 1000, 1)
+    yield {"type": "done", "sources": sources, "timings_ms": timings}

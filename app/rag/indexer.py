@@ -206,11 +206,11 @@ def index_directory(
 
 def reindex_all(directory: str = "data/documents", pdf_engine: str = "auto") -> BatchIndexResult:
     """全量重建索引 — 清空知识库后重新索引目录"""
-    from app.rag.store import clear_collection
+    from app.rag.store import reset_all_vector_indexes
     from app.rag.retriever import _invalidate_bm25_cache
     from app.rag.cache import query_cache
     logger.warning("全量重建索引：清空知识库...")
-    clear_collection()
+    reset_all_vector_indexes()
     # 清除查询缓存（避免返回旧文档结果）
     query_cache.clear()
     _invalidate_bm25_cache()

@@ -50,3 +50,12 @@ htmlcov/
 torch-*.whl
 =4.0.0
 *.torch_cache
+
+# SSH keys (credentials)
+ecs-*.key
+ecs-*.pub
+
+# Model cache (large binary files)
+models/
+*.safetensors
+*.bin

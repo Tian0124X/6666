@@ -344,12 +344,12 @@ async def smart_rag_qa(question: str) -> dict:
 
     async def _run_level_0():
         llm = get_llm(temperature=0.5)
-        answer = llm.invoke(question).content
+        answer = (await _asyncio.to_thread(llm.invoke, question)).content
         return {"answer": answer, "sources": [], "mode": "direct", "level": 0}
 
     async def _run_level_1():
         from app.rag.retriever import rag_qa
-        r = await rag_qa(question, use_expansion=True, use_rerank=True)
+        r = await rag_qa(question, use_expansion=False, use_rerank=True)
         r["mode"] = "standard"
         r["level"] = 1
         return r
@@ -409,3 +409,21 @@ async def smart_rag_qa(question: str) -> dict:
         query_cache.set(question, result)
 
     return result
+
+
+def _classify_complexity(question: str) -> int:
+    """默认 RAG 路径的快速确定性路由。
+
+    普通知识库问题不应为了判断检索策略额外消耗一次 LLM 往返。
+    """
+    normalized = question.strip().lower()
+    if len(normalized) <= 20 and any(token in normalized for token in ("hello", "hi", "你好", "谢谢", "再见")):
+        return 0
+
+    complex_markers = (
+        "对比", "比较", "差异", "趋势", "分析", "原因", "影响",
+        "关联", "关系", "分别", "综合", "多份", "多个文档",
+    )
+    if len(normalized) > 80 or sum(marker in normalized for marker in complex_markers) >= 2:
+        return 2
+    return 1

@@ -27,6 +27,12 @@ interface KnowledgeStats {
 interface PerfStats {
   p50: number; p95: number; p99: number; min: number; max: number; samples: number;
 }
+interface RequestLog {
+  time: string; method: string; path: string; status: number; latency_ms: number;
+}
+interface RuntimeStats {
+  recent_requests: RequestLog[];
+}
 
 const PIE_COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#ec4899"];
 
@@ -35,19 +41,22 @@ export default function MonitoringPage() {
   const [trends, setTrends] = useState<TrendPoint[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeStats | null>(null);
   const [perf, setPerf] = useState<PerfStats | null>(null);
+  const [requestLogs, setRequestLogs] = useState<RequestLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [days, setDays] = useState(7);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [ov, tr, kn, pf] = await Promise.all([
+      const [ov, tr, kn, pf, runtime] = await Promise.all([
         fetch("/api/analytics/overview").then((r) => r.json()),
         fetch(`/api/analytics/trends?days=${days}`, { headers: { ...authHeader() } }).then((r) => r.json()),
         fetch("/api/analytics/knowledge").then((r) => r.json()),
         fetch("/api/analytics/performance").then((r) => r.json()),
+        fetch("/api/stats", { headers: { ...authHeader() } }).then((r) => r.json()),
       ]);
       setOverview(ov); setTrends(tr.trends || []); setKnowledge(kn); setPerf(pf);
+      setRequestLogs((runtime as RuntimeStats).recent_requests || []);
     } catch { /* ignore */ }
     setLoading(false);
   }, [days]);
@@ -195,6 +204,45 @@ export default function MonitoringPage() {
                 )}
               </div>
             </div>
+          </div>
+
+          <div className="bg-[var(--color-card)] border border-[var(--color-border)] rounded-xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-[var(--color-border)] flex items-center justify-between">
+              <h3 className="font-medium">最近请求日志</h3>
+              <span className="text-xs text-[var(--color-muted-foreground)]">最近 {requestLogs.length} 条</span>
+            </div>
+            {requestLogs.length > 0 ? (
+              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-[var(--color-card)] text-xs text-[var(--color-muted-foreground)]">
+                    <tr className="border-b border-[var(--color-border)]">
+                      <th className="px-6 py-3 text-left font-medium">时间</th>
+                      <th className="px-3 py-3 text-left font-medium">方法</th>
+                      <th className="px-3 py-3 text-left font-medium">路径</th>
+                      <th className="px-3 py-3 text-left font-medium">状态</th>
+                      <th className="px-6 py-3 text-right font-medium">耗时</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {requestLogs.slice().reverse().map((log, index) => (
+                      <tr key={`${log.time}-${index}`} className="border-b border-[var(--color-border)] last:border-0">
+                        <td className="px-6 py-3 text-xs text-[var(--color-muted-foreground)] whitespace-nowrap">
+                          {new Date(log.time).toLocaleTimeString("zh-CN", { hour12: false })}
+                        </td>
+                        <td className="px-3 py-3 font-mono text-xs">{log.method}</td>
+                        <td className="px-3 py-3 font-mono text-xs max-w-md truncate">{log.path}</td>
+                        <td className={`px-3 py-3 font-mono text-xs ${log.status >= 400 ? "text-red-500" : "text-green-600"}`}>
+                          {log.status}
+                        </td>
+                        <td className="px-6 py-3 text-right font-mono text-xs">{log.latency_ms.toFixed(1)}ms</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="py-10 text-center text-sm text-[var(--color-muted-foreground)]">暂无请求日志</p>
+            )}
           </div>
         </div>
       </div>

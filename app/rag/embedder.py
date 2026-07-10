@@ -5,11 +5,14 @@ import logging
 import threading
 from typing import List
 from langchain_core.embeddings import Embeddings
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 # HuggingFace 镜像（国内加速），可通过 HF_ENDPOINT 环境变量覆盖
 _HF_MIRROR = os.getenv("HF_ENDPOINT", "https://hf-mirror.com")
+_shared_embedder: "BGEEmbeddings | None" = None
+_shared_embedder_lock = threading.Lock()
 
 
 class BGEEmbeddings(Embeddings):
@@ -27,15 +30,15 @@ class BGEEmbeddings(Embeddings):
     HuggingFace 容错：优先本地缓存，网络不通时离线加载。
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5"):
-        self.model_name = model_name
+    def __init__(self, model_name: str | None = None):
+        self.model_name = model_name or settings.RAG_EMBEDDING_MODEL
         self._model = None
         self._dim = None
         self._lock = threading.Lock()
 
     @property
     def model(self):
-        """线程安全懒加载，离线优先以避免 HuggingFace 网络不可达"""
+        """线程安全懒加载，本地路径优先，绕过 HuggingFace 网络依赖"""
         if self._model is not None:
             return self._model
 
@@ -44,24 +47,25 @@ class BGEEmbeddings(Embeddings):
                 return self._model
             from sentence_transformers import SentenceTransformer
 
-            # 策略：优先本地缓存 → 镜像 → 直连 HuggingFace
+            # SentenceTransformers 会在各个平台使用 Hugging Face 标准缓存。
+            # 旧版硬编码 /root 路径，在 Windows 下必然无法命中。
             for strategy, kwargs in [
                 ("local_cache", {"local_files_only": True}),
                 ("hf_mirror", {"local_files_only": False}),
             ]:
                 try:
                     if strategy == "hf_mirror":
-                        # 使用国内镜像加速
                         os.environ.setdefault("HF_ENDPOINT", _HF_MIRROR)
 
                     logger.info(f"加载 BGE 模型: {self.model_name} (策略: {strategy})...")
                     self._model = SentenceTransformer(self.model_name, **kwargs)
+
                     self._dim = self._model.get_embedding_dimension()
                     logger.info(f"BGE 模型就绪 ({self._dim}维, 策略: {strategy})")
                     break
                 except Exception as e:
                     logger.debug(f"BGE 加载失败 ({strategy}): {e}")
-                    if strategy == "local_cache":
+                    if strategy != "hf_mirror":
                         continue
                     raise
 
@@ -74,23 +78,30 @@ class BGEEmbeddings(Embeddings):
         return self._dim or 512
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """批量向量化文档 — 加前缀（含空列表保护）"""
+        """批量向量化文档 — BGE-M3 不加前缀"""
         if not texts:
             return []
-        texts_with_prefix = [
-            f"为这个句子生成表示以用于检索相关文章：{t}" for t in texts
-        ]
         embeddings = self.model.encode(
-            texts_with_prefix,
+            texts,
             normalize_embeddings=True,
             show_progress_bar=False,
         )
         return embeddings.tolist()
 
     def embed_query(self, text: str) -> List[float]:
-        """向量化查询 — 不加前缀"""
+        """向量化查询 — BGE-M3 不加前缀"""
         embedding = self.model.encode(
             text,
             normalize_embeddings=True,
         )
         return embedding.tolist()
+
+
+def get_embedding_model() -> BGEEmbeddings:
+    """返回所有 RAG 组件复用的进程级嵌入模型包装器。"""
+    global _shared_embedder
+    if _shared_embedder is None:
+        with _shared_embedder_lock:
+            if _shared_embedder is None:
+                _shared_embedder = BGEEmbeddings()
+    return _shared_embedder

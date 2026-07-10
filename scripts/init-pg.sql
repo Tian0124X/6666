@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS vector_documents (
     source TEXT NOT NULL,
     filename TEXT NOT NULL,
     content TEXT NOT NULL,
-    embedding vector(512),  -- BGE-Small-ZH 维度 512
+    embedding vector(1024),  -- BGE-M3 维度 1024
     metadata JSONB DEFAULT '{}',
     chunk_index INT DEFAULT 0,
     created_at TIMESTAMP DEFAULT NOW()

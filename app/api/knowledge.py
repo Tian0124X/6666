@@ -14,6 +14,7 @@ from app.rag.store import add_documents, delete_by_source, get_unique_sources
 from app.rag.retriever import rag_qa
 from app.rag.advanced import smart_rag_qa
 from app.config import settings
+from app.rag.errors import KnowledgeStoreUnavailable
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -48,6 +49,8 @@ async def _background_index(file_path: str, filename: str, pdf_engine: str = "au
             _index_status[filename] = {"status": "error", "chunks": 0, "error": "文档分块后无内容"}
             return
 
+        # 同名文件覆盖时必须先移除旧切片，否则检索会返回过期内容。
+        await asyncio.to_thread(delete_by_source, file_path)
         count = await asyncio.to_thread(add_documents, chunks)
         from app.rag.retriever import _invalidate_bm25_cache, warmup_bm25
         _invalidate_bm25_cache()
@@ -84,8 +87,11 @@ async def knowledge_qa(req: KnowledgeQARequest):
         return KnowledgeQAResponse(
             answer=result["answer"],
             sources=result["sources"],
+            timings_ms=result.get("timings_ms", {}),
         )
     except Exception as e:
+        if isinstance(e, KnowledgeStoreUnavailable):
+            raise HTTPException(status_code=503, detail="知识库向量服务暂不可用，请检查 pgvector 或 ChromaDB。")
         msg = str(e).lower()
         # ChromaDB / HTTP 连接类错误 → 503
         conn_keywords = ("connect", "closed", "refused", "cannot send", "timeout",
@@ -114,6 +120,7 @@ async def knowledge_qa_simple(req: KnowledgeQARequest):
         return KnowledgeQAResponse(
             answer=result["answer"],
             sources=result["sources"],
+            timings_ms=result.get("timings_ms", {}),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"知识问答失败: {str(e)}")
@@ -231,15 +238,18 @@ async def knowledge_qa_smart(req: KnowledgeQARequest):
             level=result.get("level", -1),
             from_cache=result.get("from_cache", False),
             iterations=result.get("iterations", 1),
+            timings_ms=result.get("timings_ms", {}),
         )
     except Exception as e:
+        if isinstance(e, KnowledgeStoreUnavailable):
+            raise HTTPException(status_code=503, detail="知识库向量服务暂不可用，请检查 pgvector 或 ChromaDB。")
         import traceback
         logger.error(f"智能问答失败: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"智能问答失败: {str(e)}")
 
 
-@router.post("/qa/stream", tags=["知识库"])
-async def knowledge_qa_smart_stream(req: KnowledgeQARequest, request: Request):
+@router.post("/qa/stream/legacy", tags=["知识库"])
+async def knowledge_qa_smart_stream_legacy(req: KnowledgeQARequest, request: Request):
     """
     2026 流式智能问答 — SSE 实时推送检索进度 + 回答内容。
 
@@ -305,6 +315,46 @@ async def knowledge_qa_smart_stream(req: KnowledgeQARequest, request: Request):
 def _sse(data: dict) -> str:
     """将 dict 序列化为 SSE data 行"""
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@router.post("/qa/stream", tags=["知识库"])
+async def knowledge_qa_stream(req: KnowledgeQARequest, request: Request):
+    """速度优先的真实流式问答：检索完成后立刻输出 LLM token。"""
+    async def event_generator():
+        try:
+            from app.rag.retriever import rag_qa_stream
+
+            yield _sse({"status": "正在检索知识库..."})
+            async for event in rag_qa_stream(req.question, k=req.top_k):
+                if await request.is_disconnected():
+                    return
+                event_type = event.get("type")
+                if event_type == "retrieval":
+                    yield _sse({
+                        "status": "检索完成，正在生成回答...",
+                        "sources": event["sources"],
+                        "timings_ms": event["timings_ms"],
+                    })
+                elif event_type == "content":
+                    yield _sse({"content": event["content"]})
+                elif event_type == "done":
+                    yield _sse({
+                        "type": "knowledge_result",
+                        "sources": event["sources"],
+                        "timings_ms": event["timings_ms"],
+                    })
+                    yield _sse({"done": True})
+        except KnowledgeStoreUnavailable:
+            yield _sse({"error": "知识库向量服务暂不可用，请检查 pgvector 或 ChromaDB。"})
+        except Exception as exc:
+            logger.exception("知识库流式问答失败")
+            yield _sse({"error": f"知识库问答失败: {exc}"})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/cache/stats", tags=["知识库"])
@@ -406,6 +456,8 @@ async def rag_diagnostics():
     return {
         "vector_backend": backend,
         "document_count": doc_count,
+        "embedding_model": settings.RAG_EMBEDDING_MODEL,
+        "embedding_dimension": settings.RAG_EMBEDDING_DIMENSION,
         "bm25_status": bm25_status,
         "bm25_document_count": bm25_doc_count,
         "reranker_available": _get_reranker() is not None,

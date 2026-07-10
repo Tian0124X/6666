@@ -8,6 +8,7 @@
 
 import logging
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 
@@ -23,8 +24,21 @@ if _log_level not in _valid_log_levels:
 logging.basicConfig(
     level=getattr(logging, _log_level),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    # Uvicorn 的访问日志输出到 stdout；应用日志也使用同一流，便于在一个控制台查看。
+    stream=sys.stdout,
+    force=True,
 )
 logger = logging.getLogger(__name__)
+request_logger = logging.getLogger("app.request")
+request_logger.setLevel(logging.INFO)
+if not request_logger.handlers:
+    # 单独输出请求日志，避免热重载子进程丢失根日志处理器。
+    request_handler = logging.StreamHandler(sys.stdout)
+    request_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    ))
+    request_logger.addHandler(request_handler)
+request_logger.propagate = False
 
 # ====== 令牌桶限流 ======
 
@@ -76,8 +90,8 @@ async def lifespan(app: FastAPI):
 def _load_models():
     """同步加载所有模型（在 executor 线程中运行）"""
     try:
-        from app.rag.embedder import BGEEmbeddings
-        embedder = BGEEmbeddings()
+        from app.rag.embedder import get_embedding_model
+        embedder = get_embedding_model()
         _ = embedder.model  # 触发 SentenceTransformer 下载/加载
         _model_load_status["bge"] = True
         logger.info(f"  BGE Embedding 就绪 ({embedder.dimension}维)")
@@ -146,10 +160,20 @@ async def rate_limit_middleware(request: Request, call_next):
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start = time.time()
-    response = await call_next(request)
-    duration = time.time() - start
-    logger.info(f"{request.method} {request.url.path} → {response.status_code} ({duration:.2f}s)")
-    return response
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        duration = time.time() - start
+        request_logger.info(
+            "%s %s → %s (%.2fs)",
+            request.method,
+            request.url.path,
+            status_code,
+            duration,
+        )
 
 
 # 监控统计中间件 — 记录请求统计到内存 + Redis

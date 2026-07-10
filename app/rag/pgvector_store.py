@@ -6,13 +6,15 @@ PostgreSQL + pgvector 向量存储 — 2026 生产级替代 ChromaDB
 """
 
 import logging
+import re
 import uuid
 from typing import List, Optional
 from datetime import datetime
 
 from langchain_core.documents import Document
 from app.config import settings
-from app.rag.embedder import BGEEmbeddings
+from app.rag.embedder import BGEEmbeddings, get_embedding_model
+from app.rag.errors import EmbeddingDimensionMismatch
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,7 @@ class PGVectorStore:
     """PostgreSQL + pgvector 向量存储 (HNSW 索引, cosine 距离)"""
 
     COLLECTION_NAME = "enterprise_knowledge"
-    DIMENSION = 512  # BGE-Small-ZH
+    DIMENSION = settings.RAG_EMBEDDING_DIMENSION
 
     def __init__(self):
         self._conn = None
@@ -51,6 +53,7 @@ class PGVectorStore:
                 dbname=settings.PG_DATABASE,
                 user=settings.PG_USER,
                 password=settings.PG_PASSWORD,
+                connect_timeout=2,
             )
             self._conn.autocommit = True
             register_vector(self._conn)
@@ -60,7 +63,7 @@ class PGVectorStore:
     @property
     def embedder(self) -> BGEEmbeddings:
         if self._embedder is None:
-            self._embedder = BGEEmbeddings()
+            self._embedder = get_embedding_model()
         return self._embedder
 
     def is_available(self) -> bool:
@@ -74,37 +77,80 @@ class PGVectorStore:
             logger.warning(f"pgvector 不可用: {e}")
             return False
 
+    def embedding_dimension(self) -> int | None:
+        """读取当前 PostgreSQL 向量列的维度。"""
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                """SELECT format_type(a.atttypid, a.atttypmod)
+                   FROM pg_attribute a
+                   WHERE a.attrelid = 'vector_documents'::regclass
+                     AND a.attname = 'embedding' AND NOT a.attisdropped"""
+            )
+            row = cur.fetchone()
+            match = re.fullmatch(r"vector\((\d+)\)", row[0]) if row else None
+            return int(match.group(1)) if match else None
+        finally:
+            cur.close()
+
+    def ensure_embedding_dimension(self) -> None:
+        actual = self.embedding_dimension()
+        if actual != self.DIMENSION:
+            raise EmbeddingDimensionMismatch(
+                f"pgvector index uses {actual or 'unknown'} dimensions, but "
+                f"{settings.RAG_EMBEDDING_MODEL} requires {self.DIMENSION}. "
+                "Run a full index rebuild before querying."
+            )
+
+    def reset_for_embedding_migration(self) -> None:
+        """清空旧向量，并将列维度迁移为当前模型所需维度。"""
+        cur = self.conn.cursor()
+        try:
+            cur.execute("DROP INDEX IF EXISTS idx_vector_embedding")
+            cur.execute("TRUNCATE TABLE vector_documents")
+            cur.execute(
+                f"ALTER TABLE vector_documents ALTER COLUMN embedding TYPE vector({self.DIMENSION})"
+            )
+            cur.execute(
+                """CREATE INDEX idx_vector_embedding ON vector_documents
+                   USING hnsw (embedding vector_cosine_ops)
+                   WITH (m = 32, ef_construction = 200)"""
+            )
+            logger.warning("pgvector reset for %s (%d dimensions)", settings.RAG_EMBEDDING_MODEL, self.DIMENSION)
+        finally:
+            cur.close()
+
     # ---- 向量操作 ----
 
     def add_documents(self, documents: List[Document], batch_size: int = 50) -> int:
         """批量添加文档向量"""
-        texts = [doc.page_content for doc in documents]
-        embeddings = self.embedder.embed_documents(texts)
-
+        self.ensure_embedding_dimension()
         cur = self.conn.cursor()
         total = 0
-        for i in range(0, len(documents), batch_size):
-            batch_docs = documents[i:i + batch_size]
-            batch_embs = embeddings[i:i + batch_size]
-            rows = []
-            for doc, emb in zip(batch_docs, batch_embs):
-                rows.append((
-                    str(uuid.uuid4()),
-                    doc.metadata.get("source", ""),
-                    doc.metadata.get("filename", "unknown"),
-                    doc.page_content,
-                    emb,
-                    self._serialize_meta(doc.metadata),
-                    doc.metadata.get("chunk_index", 0),
-                ))
-            cur.executemany(
-                """INSERT INTO vector_documents (id, source, filename, content, embedding, metadata, chunk_index)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (id) DO NOTHING""",
-                rows,
-            )
-            total += len(rows)
-        cur.close()
+        try:
+            for i in range(0, len(documents), batch_size):
+                batch_docs = documents[i:i + batch_size]
+                batch_embs = self.embedder.embed_documents([doc.page_content for doc in batch_docs])
+                rows = []
+                for doc, emb in zip(batch_docs, batch_embs):
+                    rows.append((
+                        str(uuid.uuid4()),
+                        doc.metadata.get("source", ""),
+                        doc.metadata.get("filename", "unknown"),
+                        doc.page_content,
+                        emb,
+                        self._serialize_meta(doc.metadata),
+                        doc.metadata.get("chunk_index", 0),
+                    ))
+                cur.executemany(
+                    """INSERT INTO vector_documents (id, source, filename, content, embedding, metadata, chunk_index)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (id) DO NOTHING""",
+                    rows,
+                )
+                total += len(rows)
+        finally:
+            cur.close()
         logger.info(f"pgvector: 已添加 {total} 个 chunks")
         return total
 
@@ -114,6 +160,7 @@ class PGVectorStore:
         fetch_k: int = 20,
     ) -> List[Document]:
         """混合检索: 向量相似度 (cosine) + 全文关键词"""
+        self.ensure_embedding_dimension()
         query_embedding = self.embedder.embed_query(query)
         cur = self.conn.cursor()
 
@@ -129,15 +176,14 @@ class PGVectorStore:
         vector_results = cur.fetchall()
 
         # 关键词全文检索 (PostgreSQL tsvector)
-        keywords = " | ".join(query.split())
         cur.execute(
             """SELECT content, metadata, source, filename,
-                      ts_rank(to_tsvector('simple', content), to_tsquery('simple', %s)) AS rank
+                      ts_rank(to_tsvector('simple', content), websearch_to_tsquery('simple', %s)) AS rank
                FROM vector_documents
-               WHERE to_tsvector('simple', content) @@ to_tsquery('simple', %s)
+               WHERE to_tsvector('simple', content) @@ websearch_to_tsquery('simple', %s)
                ORDER BY rank DESC
                LIMIT %s""",
-            (keywords, keywords, fetch_k),
+            (query, query, fetch_k),
         )
         text_results = cur.fetchall()
         cur.close()
@@ -250,13 +296,15 @@ class PGVectorStore:
 
 
 def get_pgvector_store() -> Optional[PGVectorStore]:
-    """获取 pgvector 存储实例 (懒加载)"""
+    """获取 pgvector 存储实例 (懒加载，失败后重试)"""
     global _pg_store
-    if _pg_store is None:
+    if _pg_store is None or _pg_store is False:
         store = PGVectorStore()
         if store.is_available():
             _pg_store = store
+            logger.info("pgvector 存储就绪")
         else:
             _pg_store = False  # type: ignore
+            logger.warning("pgvector 不可用，将回退 ChromaDB（下次调用重试）")
             return None
     return _pg_store if _pg_store is not False else None

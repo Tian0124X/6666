@@ -1,59 +1,28 @@
-"""向量存储 — pgvector(主) + ChromaDB(备) 双后端
-
-借鉴 MaxKB (pgvector) + Dify (统一DB): pgvector 生产级主力，ChromaDB 快速开发降级
-"""
+"""向量库统一入口：pgvector 为主，ChromaDB 作为回退。"""
 
 import logging
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
+
 from app.config import settings
-from app.rag.embedder import BGEEmbeddings
+from app.rag.embedder import BGEEmbeddings, get_embedding_model
+from app.rag.errors import KnowledgeStoreUnavailable
 
 logger = logging.getLogger(__name__)
 
-# 向量后端优先级: pgvector > ChromaDB
-_vector_backend: Optional[str] = None  # "pgvector" | "chromadb" | None
-
-
-def _detect_backend() -> str:
-    """检测可用的向量后端"""
-    global _vector_backend
-    if _vector_backend is not None:
-        return _vector_backend
-
-    # 尝试 pgvector
-    try:
-        from app.rag.pgvector_store import get_pgvector_store
-        store = get_pgvector_store()
-        if store and store.is_available():
-            _vector_backend = "pgvector"
-            logger.info("🎯 向量后端: pgvector (PostgreSQL)")
-            return _vector_backend
-    except Exception as e:
-        logger.debug(f"pgvector 跳过: {e}")
-
-    # 回退 ChromaDB
-    _vector_backend = "chromadb"
-    logger.info("🎯 向量后端: ChromaDB (回退)")
-    return _vector_backend
-
 COLLECTION_NAME = "enterprise_knowledge"
-
-# HNSW 索引参数（2026 生产最佳实践）
-# ChromaDB 底层使用 HNSW (Hierarchical Navigable Small World)
-# 对比 IVF_FLAT: HNSW 查询快 3-5x，内存占用略高
 HNSW_METADATA = {
-    "hnsw:space": "cosine",            # 距离度量: cosine / l2 / ip
-    "hnsw:construction_ef": 200,       # 构建精度 (默认100, 越大越精确但越慢)
-    "hnsw:search_ef": 100,             # 查询精度 (默认10, 100 = 高精度模式)
-    "hnsw:M": 32,                      # 每节点最大连接数 (默认16, 32 = 高召回)
-    "hnsw:num_threads": 4,             # 构建并行线程数
-    "hnsw:resize_factor": 2,           # 扩容因子
+    "hnsw:space": "cosine",
+    "hnsw:construction_ef": 200,
+    "hnsw:search_ef": 100,
+    "hnsw:M": 32,
+    "hnsw:num_threads": 4,
+    "hnsw:resize_factor": 2,
 }
 
-# 全局单例
+_vector_backend: Optional[str] = None
 _embedder: Optional[BGEEmbeddings] = None
 _vector_store: Optional[Chroma] = None
 
@@ -61,199 +30,195 @@ _vector_store: Optional[Chroma] = None
 def get_embedder() -> BGEEmbeddings:
     global _embedder
     if _embedder is None:
-        logger.info("正在加载 BGE-Small-ZH 模型...")
-        _embedder = BGEEmbeddings()
-        logger.info(f"BGE 模型就绪 (维度: {_embedder.dimension})")
+        _embedder = get_embedding_model()
     return _embedder
 
 
-def get_vector_store():
-    """获取向量存储实例（懒加载单例，含 HNSW 索引配置）"""
+def _create_chroma_client():
+    import chromadb
+    from chromadb.config import Settings as ChromaSettings
+
+    return chromadb.HttpClient(
+        host=settings.CHROMA_HOST,
+        port=settings.CHROMA_PORT,
+        settings=ChromaSettings(anonymized_telemetry=False),
+    )
+
+
+def _reset_vector_store() -> None:
+    global _vector_store
+    _vector_store = None
+
+
+def get_vector_store() -> Chroma:
     global _vector_store
     if _vector_store is None:
-        from langchain_chroma import Chroma
-        import chromadb
-        from chromadb.config import Settings as ChromaSettings
         _vector_store = Chroma(
             collection_name=COLLECTION_NAME,
             embedding_function=get_embedder(),
             collection_metadata=HNSW_METADATA,
-            client=chromadb.HttpClient(
-                host=settings.CHROMA_HOST,
-                port=settings.CHROMA_PORT,
-                settings=ChromaSettings(anonymized_telemetry=False),
-            ),
-        )
-        logger.info(
-            f"ChromaDB 连接就绪: {settings.chroma_url} "
-            f"(HNSW: M={HNSW_METADATA['hnsw:M']}, "
-            f"ef_construction={HNSW_METADATA['hnsw:construction_ef']}, "
-            f"ef_search={HNSW_METADATA['hnsw:search_ef']})"
+            client=_create_chroma_client(),
         )
     return _vector_store
 
 
-def add_documents(documents: List[Document], batch_size: int = 50) -> int:
-    """批量添加文档到向量库。pgvector 主 → ChromaDB 备。"""
-    backend = _detect_backend()
+def _detect_backend() -> str:
+    """返回健康后端；应用启动早于 Docker 就绪时允许 pgvector 恢复。"""
+    global _vector_backend
+    try:
+        from app.rag.pgvector_store import get_pgvector_store
 
+        pg = get_pgvector_store()
+        if pg and pg.is_available():
+            _vector_backend = "pgvector"
+            return _vector_backend
+    except Exception as exc:
+        logger.debug("pgvector unavailable: %s", exc)
+
+    try:
+        get_vector_store()._collection.count()
+        _vector_backend = "chromadb"
+        return _vector_backend
+    except Exception as exc:
+        _vector_backend = None
+        raise KnowledgeStoreUnavailable("Neither pgvector nor ChromaDB is available") from exc
+
+
+def _chroma_op_with_retry(operation: Callable, *args, max_retries: int = 2):
+    for attempt in range(max_retries):
+        try:
+            return operation(get_vector_store(), *args)
+        except Exception:
+            _reset_vector_store()
+            if attempt == max_retries - 1:
+                raise
+
+
+def add_documents(documents: List[Document], batch_size: int = 50) -> int:
+    backend = _detect_backend()
     if backend == "pgvector":
         from app.rag.pgvector_store import get_pgvector_store
-        store = get_pgvector_store()
-        if store:
-            return store.add_documents(documents, batch_size)
 
-    # ChromaDB 回退
-    store = get_vector_store()
-    total = 0
-    for i in range(0, len(documents), batch_size):
-        batch = documents[i:i + batch_size]
-        store.add_documents(batch)
-        total += len(batch)
-    logger.info(f"ChromaDB 已添加 {total} 个 chunks")
-    return total
+        pg = get_pgvector_store()
+        if pg:
+            return pg.add_documents(documents, batch_size)
+
+    def add_batches(store: Chroma, docs: List[Document], size: int) -> int:
+        for offset in range(0, len(docs), size):
+            store.add_documents(docs[offset:offset + size])
+        return len(docs)
+
+    try:
+        return _chroma_op_with_retry(add_batches, documents, batch_size)
+    except Exception as exc:
+        raise KnowledgeStoreUnavailable("ChromaDB add failed") from exc
 
 
 def delete_by_source(source: str) -> int:
-    """按源文件路径删除文档"""
     backend = _detect_backend()
     if backend == "pgvector":
         from app.rag.pgvector_store import get_pgvector_store
-        store = get_pgvector_store()
-        if store:
-            return store.delete_by_source(source)
 
-    store = get_vector_store()
-    results = store.get(where={"source": source})
-    ids = results.get("ids", [])
-    if ids:
-        store.delete(ids=ids)
-        logger.info(f"已删除 {len(ids)} 个 chunks (source={source})")
-    return len(ids)
+        pg = get_pgvector_store()
+        if pg:
+            return pg.delete_by_source(source)
+
+    def delete_source(store: Chroma, value: str) -> int:
+        result = store.get(where={"source": value})
+        ids = result.get("ids", [])
+        if ids:
+            store.delete(ids=ids)
+        return len(ids)
+
+    try:
+        return _chroma_op_with_retry(delete_source, source)
+    except Exception as exc:
+        raise KnowledgeStoreUnavailable("ChromaDB delete failed") from exc
 
 
 def get_document_count() -> int:
-    """获取知识库中的文档 chunk 总数"""
-    backend = _detect_backend()
-    if backend == "pgvector":
-        from app.rag.pgvector_store import get_pgvector_store
-        store = get_pgvector_store()
-        if store:
-            return store.get_document_count()
-
     try:
-        store = get_vector_store()
-        return store._collection.count()
-    except Exception as e:
-        logger.warning(f"获取文档数失败: {e}")
+        if _detect_backend() == "pgvector":
+            from app.rag.pgvector_store import get_pgvector_store
+
+            pg = get_pgvector_store()
+            return pg.get_document_count() if pg else 0
+        return get_vector_store()._collection.count()
+    except KnowledgeStoreUnavailable:
         return 0
 
 
 def get_unique_sources() -> List[str]:
-    """获取知识库中所有不重复的源文件"""
-    backend = _detect_backend()
-    if backend == "pgvector":
-        from app.rag.pgvector_store import get_pgvector_store
-        store = get_pgvector_store()
-        if store:
-            return store.get_unique_sources()
-
     try:
-        store = get_vector_store()
-        results = store.get()
-        sources = set()
-        for meta in results.get("metadatas", []):
-            if meta and "filename" in meta:
-                sources.add(meta["filename"])
-        return sorted(sources)
-    except Exception as e:
-        logger.warning(f"获取源文件列表失败: {e}")
+        if _detect_backend() == "pgvector":
+            from app.rag.pgvector_store import get_pgvector_store
+
+            pg = get_pgvector_store()
+            return pg.get_unique_sources() if pg else []
+        result = get_vector_store().get(include=["metadatas"])
+        return sorted({meta.get("filename", "") for meta in result.get("metadatas", []) if meta})
+    except KnowledgeStoreUnavailable:
         return []
 
 
-def clear_collection():
-    """清空整个知识库"""
-    backend = _detect_backend()
-    if backend == "pgvector":
-        from app.rag.pgvector_store import get_pgvector_store
-        store = get_pgvector_store()
-        if store:
-            store.clear_collection()
-            return
-
+def clear_collection() -> None:
+    """删除 ChromaDB collection，不影响原始文档。"""
     try:
-        store = get_vector_store()
-        count = store._collection.count()
-        if count > 0:
-            page_size = 500
-            deleted = 0
-            for offset in range(0, count, page_size):
-                batch = store.get(limit=page_size, offset=offset)
-                ids = batch.get("ids", [])
-                if ids:
-                    store.delete(ids=ids)
-                    deleted += len(ids)
-            logger.warning(f"已清空知识库 ({deleted} 个 chunks)")
-    except Exception as e:
-        logger.warning(f"清空知识库失败: {e}")
+        _create_chroma_client().delete_collection(COLLECTION_NAME)
+    except Exception as exc:
+        if "does not exist" not in str(exc).lower():
+            raise KnowledgeStoreUnavailable("Unable to delete ChromaDB collection") from exc
+    finally:
+        _reset_vector_store()
 
 
-# ============================================================
-# 后端感知读取函数 — 修复 BM25/向量检索数据源不对称缺陷
-# ============================================================
+def reset_all_vector_indexes() -> None:
+    """嵌入模型迁移时，直接清空两套向量后端。"""
+    from app.rag.pgvector_store import get_pgvector_store
+
+    pg = get_pgvector_store()
+    if not pg:
+        raise KnowledgeStoreUnavailable("pgvector is required for a full index rebuild")
+    pg.reset_for_embedding_migration()
+    clear_collection()
+
 
 def get_all_documents_for_bm25(limit: int = 5000) -> List[Document]:
-    """从当前活跃后端获取所有文档（BM25 索引构建用）
-
-    修复: retriever.py 之前硬编码从 ChromaDB 读取，
-    当 pgvector 是主后端时 ChromaDB 为空，BM25 返回空结果。
-    """
     backend = _detect_backend()
     if backend == "pgvector":
         from app.rag.pgvector_store import get_pgvector_store
-        pg = get_pgvector_store()
-        if pg:
-            return pg.get_all_documents(limit=limit)
 
-    # ChromaDB 回退（分页加载）
+        pg = get_pgvector_store()
+        return pg.get_all_documents(limit=limit) if pg else []
+
     try:
         store = get_vector_store()
-        total = store._collection.count()
-        docs = []
-        for offset in range(0, min(total, limit), 500):
-            results = store.get(limit=500, offset=offset)
-            for i, content in enumerate(results.get("documents", [])):
-                meta = results.get("metadatas", [{}])[i] if results.get("metadatas") else {}
-                docs.append(Document(page_content=content, metadata=meta))
-        if total > limit:
-            logger.warning(f"文档总数 {total} 超过 BM25 上限 {limit}，仅索引前 {limit} 条")
+        total = min(store._collection.count(), limit)
+        docs: List[Document] = []
+        for offset in range(0, total, 500):
+            result = store.get(limit=min(500, total - offset), offset=offset)
+            for index, content in enumerate(result.get("documents", [])):
+                metadata = result.get("metadatas", [{}])[index] if result.get("metadatas") else {}
+                docs.append(Document(page_content=content, metadata=metadata))
         return docs
-    except Exception as e:
-        logger.warning(f"ChromaDB 获取文档失败: {e}")
-        return []
+    except Exception as exc:
+        raise KnowledgeStoreUnavailable("ChromaDB document scan failed") from exc
 
 
 def get_vector_search_results(query: str, k: int = 20, fetch_k: int = 60) -> List[Document]:
-    """从当前活跃后端执行向量检索
-
-    修复: _hybrid_search 之前硬编码用 ChromaDB MMR，
-    当 pgvector 是主后端时直接使用 pgvector 的向量+全文混合检索。
-    """
     backend = _detect_backend()
     if backend == "pgvector":
         from app.rag.pgvector_store import get_pgvector_store
+
         pg = get_pgvector_store()
         if pg:
             return pg.search(query, k=k, fetch_k=fetch_k)
 
-    # ChromaDB MMR 回退
     try:
-        store = get_vector_store()
-        retriever = store.as_retriever(
+        retriever = get_vector_store().as_retriever(
             search_type="mmr",
             search_kwargs={"k": k, "fetch_k": fetch_k, "lambda_mult": 0.7},
         )
         return retriever.invoke(query)
-    except Exception as e:
-        logger.warning(f"ChromaDB 向量检索失败: {e}")
-        return []
+    except Exception as exc:
+        raise KnowledgeStoreUnavailable("ChromaDB vector search failed") from exc

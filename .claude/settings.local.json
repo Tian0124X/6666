@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(.venv/Scripts/python -c ' *)"
+      "Bash(.venv/Scripts/python -c ' *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(python3 *)"
     ]
   }
 }

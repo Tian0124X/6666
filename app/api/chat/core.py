@@ -338,3 +338,40 @@ async def _handle_agent_channel(req, user, memory):
             _asyncio.create_task(H.memory_hooks(req.session_id, user.username, history))
     except Exception:
         pass
+
+
+async def _handle_rag_fast_channel(req, user, memory):
+    """知识库快速通道：将真实 RAG token 直接转为聊天 SSE。"""
+    from app.rag.retriever import rag_qa_stream
+
+    history = memory.get_history(req.session_id, user.username)
+    rag_query = req.message
+    if history:
+        context = "\n".join(f"{item.role}: {item.content}" for item in history[-6:])
+        rag_query = f"对话历史：\n{context}\n\n用户最新问题：{req.message}"
+
+    answer_parts: list[str] = []
+    sources: list[dict] = []
+    try:
+        async for event in rag_qa_stream(rag_query):
+            event_type = event.get("type")
+            if event_type == "retrieval":
+                sources = event["sources"]
+                yield f"data: {json.dumps({'status': '知识库检索完成，正在生成回答...'}, ensure_ascii=False)}\n\n"
+            elif event_type == "content":
+                content = event["content"]
+                answer_parts.append(content)
+                yield f"data: {json.dumps({'content': content}, ensure_ascii=False)}\n\n"
+            elif event_type == "done":
+                sources = event["sources"]
+
+        answer = "".join(answer_parts)
+        yield f"data: {json.dumps({'type': 'knowledge_result', 'sources': sources}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'done': True}, ensure_ascii=False)}\n\n"
+        await memory.add_message(req.session_id, user.username, "user", req.message)
+        if answer:
+            await memory.add_message(req.session_id, user.username, "assistant", answer)
+        from app.api.analytics import track_event
+        track_event("chat_end", user.username, req.session_id, {"has_answer": bool(answer), "route": "rag_fast"})
+    except Exception as exc:
+        logger.warning("RAG 快速通道失败，降级 Agent: %s", exc)
