@@ -1,75 +1,34 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useEffect } from "react";
 import { Layout } from "./components/Layout";
-import { useThemeStore } from "./stores/themeStore";
-import { useAuthStore } from "./stores/authStore";
-import ChatPage from "./pages/ChatPage";
 import KnowledgePage from "./pages/KnowledgePage";
-import MonitoringPage from "./pages/MonitoringPage";
-import EvalPage from "./pages/EvalPage";
-import HistoryPage from "./pages/HistoryPage";
-import SettingsPage from "./pages/SettingsPage";
-import AnalyticsPage from "./pages/AnalyticsPage";
 import LoginPage from "./pages/LoginPage";
+import RagPage from "./pages/RagPage";
+import { useAuthStore } from "./stores/authStore";
+import { useThemeStore } from "./stores/themeStore";
 
 function ThemeInit() {
   const { theme } = useThemeStore();
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-  }, [theme]);
+  useEffect(() => { document.documentElement.classList.toggle("dark", theme === "dark"); }, [theme]);
   return null;
 }
 
-function AuthInit() {
-  const restore = useAuthStore((s) => s.restore);
-  useEffect(() => { restore(); }, [restore]);
-  return null;
-}
-
-/** 路由守卫: 初始化中显示 loading，未登录重定向到 /login */
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const isLoggedIn = useAuthStore((s) => s.isLoggedIn);
-  const isRestoring = useAuthStore((s) => s.isRestoring);
-
-  if (isRestoring) {
-    return (
-      <div className="h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-3 text-muted-foreground">
-          <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-          <p className="text-sm">加载中...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!isLoggedIn) return <Navigate to="/login" replace />;
-  return <>{children}</>;
+  const isLoggedIn = useAuthStore((state) => state.isLoggedIn);
+  const isRestoring = useAuthStore((state) => state.isRestoring);
+  if (isRestoring) return <div className="h-screen grid place-items-center text-sm text-muted-foreground">正在加载…</div>;
+  return isLoggedIn ? <>{children}</> : <Navigate to="/login" replace />;
 }
 
 export default function App() {
-  return (
-    <BrowserRouter>
-      <ThemeInit />
-      <AuthInit />
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route
-          element={
-            <ProtectedRoute>
-              <Layout />
-            </ProtectedRoute>
-          }
-        >
-          <Route index element={<ChatPage />} />
-          <Route path="history" element={<HistoryPage />} />
-          <Route path="knowledge" element={<KnowledgePage />} />
-          <Route path="monitoring" element={<MonitoringPage />} />
-          <Route path="eval" element={<EvalPage />} />
-          <Route path="analytics" element={<AnalyticsPage />} />
-          <Route path="settings" element={<SettingsPage />} />
-        </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
-  );
+  const restore = useAuthStore((state) => state.restore);
+  useEffect(() => { restore(); }, [restore]);
+  return <BrowserRouter><ThemeInit /><Routes>
+    <Route path="/login" element={<LoginPage />} />
+    <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+      <Route index element={<RagPage />} />
+      <Route path="knowledge" element={<KnowledgePage />} />
+    </Route>
+    <Route path="*" element={<Navigate to="/" replace />} />
+  </Routes></BrowserRouter>;
 }

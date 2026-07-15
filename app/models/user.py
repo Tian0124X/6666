@@ -228,7 +228,7 @@ def _make_refresh_token(username: str) -> str:
     _tokens[f"refresh:{token}"] = username
     # Redis (如果可用)
     try:
-        from app.memory.store import _get_redis
+        from app.auth.token_store import get_redis as _get_redis
         redis = _get_redis()
         if redis:
             redis.setex(f"refresh:{token}", 86400 * 7, username)  # 7 天
@@ -329,7 +329,7 @@ def refresh_access_token(refresh_token: str) -> Optional[dict]:
 
     # 1. Redis 查找
     try:
-        from app.memory.store import _get_redis
+        from app.auth.token_store import get_redis as _get_redis
         redis = _get_redis()
         if redis:
             username = redis.get(f"refresh:{refresh_token}")
@@ -372,7 +372,7 @@ def logout(token: str):
 
     # 也加入 Redis 黑名单
     try:
-        from app.memory.store import _get_redis
+        from app.auth.token_store import get_redis as _get_redis
         redis = _get_redis()
         if redis and _JWT_AVAILABLE:
             try:

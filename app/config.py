@@ -41,11 +41,7 @@ class Settings:
     MYSQL_PASSWORD: str = os.getenv("MYSQL_PASSWORD", "")
     MYSQL_DATABASE: str = os.getenv("MYSQL_DATABASE", "enterprise_ai_office")
 
-    # === ChromaDB ===
-    CHROMA_HOST: str = os.getenv("CHROMA_HOST", "localhost")
-    CHROMA_PORT: int = _int_env("CHROMA_PORT", 8001)
-
-    # === PostgreSQL + pgvector (可选) ===
+    # === PostgreSQL + pgvector ===
     PG_HOST: str = os.getenv("PG_HOST", "localhost")
     PG_PORT: int = _int_env("PG_PORT", 5432)
     PG_DATABASE: str = os.getenv("PG_DATABASE", "enterprise_ai_office")
@@ -73,23 +69,12 @@ class Settings:
     CRM_API_URL: str = os.getenv("CRM_API_URL", "")
 
     # === RAG 璋冧紭 ===
-    RAG_BM25_ENABLED: bool = os.getenv("RAG_BM25_ENABLED", "true").lower() == "true"
     RAG_SEARCH_K: int = _int_env("RAG_SEARCH_K", 20)
     RAG_RERANK_TOP_N: int = _int_env("RAG_RERANK_TOP_N", 5)
-    RAG_KNOWLEDGE_FAST_CHANNEL: bool = os.getenv("RAG_KNOWLEDGE_FAST_CHANNEL", "true").lower() == "true"
+    # CPU Cross-Encoder 会造成二十秒级延迟，默认只允许离线评测使用。
+    RAG_ONLINE_RERANK: bool = os.getenv("RAG_ONLINE_RERANK", "false").lower() == "true"
     RAG_EMBEDDING_MODEL: str = os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-m3")
     RAG_EMBEDDING_DIMENSION: int = _int_env("RAG_EMBEDDING_DIMENSION", 1024)
-    # === 图谱检索后端 ===
-    GRAPH_BACKEND: str = os.getenv("GRAPH_BACKEND", "lightrag")  # lightrag | neo4j | none
-    LIGHTRAG_PERSIST_DIR: str = os.getenv("LIGHTRAG_PERSIST_DIR", "./data/lightrag")
-
-    # === Neo4j (知识图谱持久化) ===
-    NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
-    NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "")
-    NEO4J_ENABLED: bool = os.getenv("NEO4J_ENABLED", "false").lower() == "true"
-
-
     # === MinerU PDF 增强解析 ===
     PDF_PARSER: str = os.getenv("PDF_PARSER", "auto")
     MINERU_OCR: bool = os.getenv("MINERU_OCR", "false").lower() == "true"
@@ -102,10 +87,6 @@ class Settings:
             warnings.append(
                 "LLM_API_KEY 未配置或为占位符，请设置 .env 中的 LLM_API_KEY。"
                 "LLM 调用将使用回退模式（规则引擎/Mock）。"
-            )
-        if self.GRAPH_BACKEND == "neo4j" and self.NEO4J_ENABLED and not self.NEO4J_PASSWORD:
-            warnings.append(
-                "GRAPH_BACKEND=neo4j + NEO4J_ENABLED=true 但 NEO4J_PASSWORD 为空，Neo4j 连接可能失败。"
             )
         if not self.MYSQL_PASSWORD:
             warnings.append("MYSQL_PASSWORD 为空，数据库连接可能失败。")
@@ -122,11 +103,6 @@ class Settings:
             f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DATABASE}"
             f"?charset=utf8mb4"
         )
-
-    @property
-    def chroma_url(self) -> str:
-        return f"http://{self.CHROMA_HOST}:{self.CHROMA_PORT}"
-
 
 settings = Settings()
 

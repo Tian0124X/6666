@@ -105,7 +105,7 @@ export default function LoginPage() {
           <div className="w-16 h-16 rounded-2xl bg-blue-600 flex items-center justify-center mx-auto mb-4">
             <Bot className="w-9 h-9 text-white" />
           </div>
-          <h1 className="text-xl font-bold text-[var(--color-foreground)]">企业智能办公助手</h1>
+          <h1 className="text-xl font-bold text-[var(--color-foreground)]">知识库 RAG</h1>
           <p className="text-sm text-[var(--color-muted-foreground)] mt-1">
             {isLogin ? "选择登录方式" : "创建新账户"}
           </p>

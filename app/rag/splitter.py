@@ -188,6 +188,8 @@ def split_documents(
     # 丰富元数据
     for i, chunk in enumerate(chunks):
         chunk.metadata["chunk_id"] = i
+        # 写入 pgvector 时会替换为全局 UUID；此字段保留原始顺序。
+        chunk.metadata["chunk_index"] = i
         chunk.metadata["chunk_preview"] = chunk.page_content[:100]
 
     return chunks

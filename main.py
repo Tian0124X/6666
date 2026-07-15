@@ -1,239 +1,109 @@
-"""企业智能办公助手平台 — FastAPI 入口（唯一 main.py）
+"""知识库 RAG 的 FastAPI 入口。"""
 
-启动:
-  python main.py              → http://localhost:8000
-  uvicorn main:app --reload   → 开发模式热重载
-  PyCharm: Run main.py        → 自动识别 FastAPI app
-"""
+from __future__ import annotations
 
+import asyncio
 import logging
-import os
 import sys
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.config import settings
 
-# ====== 日志 ======
-_valid_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-_log_level = settings.LOG_LEVEL.upper().strip() if settings.LOG_LEVEL else "INFO"
-if _log_level not in _valid_log_levels:
-    _log_level = "INFO"
 logging.basicConfig(
-    level=getattr(logging, _log_level),
+    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    # Uvicorn 的访问日志输出到 stdout；应用日志也使用同一流，便于在一个控制台查看。
     stream=sys.stdout,
     force=True,
 )
 logger = logging.getLogger(__name__)
-request_logger = logging.getLogger("app.request")
-request_logger.setLevel(logging.INFO)
-if not request_logger.handlers:
-    # 单独输出请求日志，避免热重载子进程丢失根日志处理器。
-    request_handler = logging.StreamHandler(sys.stdout)
-    request_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    ))
-    request_logger.addHandler(request_handler)
-request_logger.propagate = False
+_model_status = {"embedding": False}
 
-# ====== 令牌桶限流 ======
 
 class TokenBucket:
-    """令牌桶限流：按 IP 限制请求速率"""
+    """按客户端 IP 限制 RAG 请求速率。"""
 
-    def __init__(self, rate: int = 30, burst: int = 60):
+    def __init__(self, rate: int = 20, burst: int = 40) -> None:
         self.rate = rate
         self.burst = burst
         self.buckets: dict[str, tuple[float, float]] = {}
 
     def consume(self, key: str) -> bool:
         now = time.time()
-        tokens, last = self.buckets.get(key, (self.burst, now))
-        tokens = min(self.burst, tokens + (now - last) * self.rate)
-        self.buckets[key] = (tokens, now)
-        if tokens >= 1:
-            self.buckets[key] = (tokens - 1, now)
-            return True
-        return False
-
-_token_bucket = TokenBucket(rate=30, burst=60)
-
-# 模型加载状态 (暴露给 /api/health)
-_model_load_status = {"bge": False, "reranker": False}
+        tokens, previous = self.buckets.get(key, (self.burst, now))
+        tokens = min(self.burst, tokens + (now - previous) * self.rate)
+        self.buckets[key] = (tokens - 1, now) if tokens >= 1 else (tokens, now)
+        return tokens >= 1
 
 
-# ====== 应用 ======
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("🚀 企业智能办公助手平台启动中...")
-    logger.info(f"   环境: {settings.APP_ENV}  模型: {settings.LLM_MODEL}  限流: 30 req/s")
-
-    # 预热模型：后台线程加载 BGE + Reranker，避免首次请求阻塞
-    import asyncio
-    loop = asyncio.get_running_loop()
-
-    async def _warmup():
-        """在 executor 中加载模型，不阻塞事件循环"""
-        await loop.run_in_executor(None, _load_models)
-        logger.info("✅ 模型预热完成")
-
-    asyncio.create_task(_warmup())
-    yield
-    logger.info("👋 应用关闭")
+_bucket = TokenBucket()
 
 
-def _load_models():
-    """同步加载所有模型（在 executor 线程中运行）"""
+def _warm_models() -> None:
+    """进程启动时预热 embedding，避免首个用户请求承担下载与加载延迟。"""
     try:
         from app.rag.embedder import get_embedding_model
-        embedder = get_embedding_model()
-        _ = embedder.model  # 触发 SentenceTransformer 下载/加载
-        _model_load_status["bge"] = True
-        logger.info(f"  BGE Embedding 就绪 ({embedder.dimension}维)")
-    except Exception as e:
-        logger.error(f"  BGE 加载失败: {e}")
 
-    try:
-        from app.rag.retriever import _get_reranker
-        _get_reranker()
-        _model_load_status["reranker"] = True
-        logger.info("  BGE Reranker 就绪")
-    except Exception as e:
-        logger.error(f"  Reranker 加载失败: {e}")
+        model = get_embedding_model()
+        _ = model.model
+        _model_status["embedding"] = True
+        logger.info("知识库 RAG embedding 预热完成")
+    except Exception as exc:
+        logger.warning("embedding 预热失败，首次请求将重试: %s", exc)
 
-    try:
-        from app.rag.retriever import warmup_bm25
-        warmup_bm25(k=20)
-        _model_load_status["bm25"] = True
-        logger.info("  BM25 索引就绪")
-    except Exception as e:
-        logger.warning(f"  BM25 预热跳过: {e}")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    logger.info("知识库 RAG 启动中")
+    asyncio.create_task(asyncio.to_thread(_warm_models))
+    yield
+    logger.info("知识库 RAG 已停止")
 
 
 app = FastAPI(
-    title="企业智能办公助手平台 API",
-    description="基于 LangGraph + LangChain 的 Multi-Agent 智能办公平台",
-    version="1.0.0",
+    title="知识库 RAG API",
+    description="基于 PostgreSQL + pgvector 的可追溯知识库问答服务",
+    version="2.0.0",
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
 )
-
-# CORS — 开发 + 生产域名
-_cors_origins = [
-    "http://localhost:5173", "http://localhost:3000",
-    "http://127.0.0.1:5173", "http://127.0.0.1:3000",
-]
-# 从环境变量读取生产前端 URL (支持多个,逗号分隔)
-_frontend_url = os.getenv("FRONTEND_URL", "")
-if _frontend_url:
-    _cors_origins.extend(u.strip() for u in _frontend_url.split(",") if u.strip())
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# 速率限制中间件
 @app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    path = request.url.path
-    if path in ("/", "/api/health", "/docs", "/redoc", "/openapi.json"):
-        return await call_next(request)
-    client_ip = request.client.host if request.client else "unknown"
-    if not _token_bucket.consume(client_ip):
-        logger.warning(f"速率限制触发: {client_ip} {request.method} {path}")
-        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后重试")
-    return await call_next(request)
+async def protect_and_log(request: Request, call_next):
+    """对公开接口限流并输出易读的请求耗时。"""
+    if request.url.path not in {"/", "/api/health", "/docs", "/openapi.json"}:
+        client = request.client.host if request.client else "unknown"
+        if not _bucket.consume(client):
+            raise HTTPException(status_code=429, detail="请求过于频繁，请稍后重试")
+    started = time.perf_counter()
+    response = await call_next(request)
+    logger.info("%s %s -> %s (%.0fms)", request.method, request.url.path, response.status_code,
+                (time.perf_counter() - started) * 1000)
+    return response
 
 
-# 请求日志中间件
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    start = time.time()
-    status_code = 500
-    try:
-        response = await call_next(request)
-        status_code = response.status_code
-        return response
-    finally:
-        duration = time.time() - start
-        request_logger.info(
-            "%s %s → %s (%.2fs)",
-            request.method,
-            request.url.path,
-            status_code,
-            duration,
-        )
+from app.api import auth, rag
 
-
-# 监控统计中间件 — 记录请求统计到内存 + Redis
-from app.api.monitoring import track_request
-app.middleware("http")(track_request)
-
-# ====== 路由 ======
-from app.api import chat, knowledge, tools, monitoring, auth, eval, analytics
-
-app.include_router(chat.router, prefix="/api")
-app.include_router(knowledge.router, prefix="/api/knowledge")
-app.include_router(tools.router, prefix="/api/tools")
-app.include_router(monitoring.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
-app.include_router(eval.router, prefix="/api")
-app.include_router(analytics.router, prefix="/api")
+app.include_router(rag.router, prefix="/api/rag")
 
 
 @app.get("/", tags=["系统"])
 async def root():
-    return {
-        "name": "企业智能办公助手平台 API",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "health": "/api/health",
-    }
+    return {"name": "知识库 RAG", "version": "2.0.0", "docs": "/docs", "health": "/api/health"}
 
 
 @app.get("/api/health", tags=["系统"])
 async def health_check():
-    return {
-        "status": "ok",
-        "version": "1.0.0",
-        "llm_model": settings.LLM_MODEL,
-        "models": _model_load_status,
-    }
-
-
-@app.get("/api/info", tags=["系统"])
-async def system_info():
-    info = {"version": "1.0.0", "llm_model": settings.LLM_MODEL, "services": {}}
-    for w in settings.validate():
-        logger.warning(f"配置警告: {w}")
-    try:
-        import redis
-        r = redis.from_url(settings.REDIS_URL, socket_connect_timeout=2)
-        r.ping(); r.close()
-        info["services"]["redis"] = "connected"
-    except Exception as e:
-        info["services"]["redis"] = f"unavailable ({e})"
-    try:
-        from app.rag.store import get_vector_store
-        store = get_vector_store()
-        info["services"]["chromadb"] = f"connected ({store._collection.count()} chunks)"
-    except Exception as e:
-        info["services"]["chromadb"] = f"unavailable ({e})"
-    return info
-
-
-# ====== 直接启动 ======
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
+    return {"status": "ok", "version": "2.0.0", "embedding_ready": _model_status["embedding"]}

@@ -121,8 +121,8 @@ class TestRetrieverFormatting:
         assert "第3页" in result
         assert "第4页" in result
         assert "15 天" in result
-        assert "[来源1]" in result
-        assert "[来源2]" in result
+        assert "[S1]" in result
+        assert "[S2]" in result
 
     def test_format_context_single_doc(self):
         from app.rag.retriever import _format_context
@@ -131,7 +131,7 @@ class TestRetrieverFormatting:
             metadata={"filename": "test.txt"},
         )]
         result = _format_context(docs)
-        assert "[来源1]" in result
+        assert "[S1]" in result
         assert "test.txt" in result
 
     def test_chinese_tokenize_jieba(self):
