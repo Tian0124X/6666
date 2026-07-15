@@ -175,7 +175,7 @@ def _get_engine():
         except Exception as e:
             _engine_failed = True
             logger.warning(
-                f"MySQL 不可用 ({e})，对话持久化降级为内存+Redis"
+                f"MySQL 不可用 ({e})，对话持久化降级为进程内缓存"
             )
     return _engine if not _engine_failed else None
 

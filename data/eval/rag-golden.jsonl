@@ -1,0 +1,34 @@
+{"id":"leave-01","question":"员工带薪年休假管理办法的文档编号是什么？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"政策页码"}
+{"id":"leave-02","question":"年休假政策从哪天开始生效？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"政策查询"}
+{"id":"leave-03","question":"连续工作满多久可以享受带薪年休假？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"政策查询"}
+{"id":"leave-04","question":"累计工作1到10年的法定年休假有几天？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"政策查询"}
+{"id":"leave-05","question":"累计工作满10年但不满20年的法定年假天数是多少？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"同义问法"}
+{"id":"leave-06","question":"累计工作满20年可享受多少天法定年休假？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"政策查询"}
+{"id":"leave-07","question":"公司司龄福利年假每满几年增加一天，上限是多少？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"政策查询"}
+{"id":"leave-08","question":"新员工需要在入职多少天内提交累计工龄证明？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"政策查询"}
+{"id":"leave-09","question":"单次申请年假最小单位是多少天？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"政策查询"}
+{"id":"leave-10","question":"连续休年假3天及以上，建议提前多少个工作日申请？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"流程查询"}
+{"id":"leave-11","question":"年假申请的审批顺序是什么？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"流程查询"}
+{"id":"leave-12","question":"同一部门同一时间段休假的人数上限比例是多少？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"政策查询"}
+{"id":"leave-13","question":"病假会不会抵扣年休假额度？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"否定问答"}
+{"id":"leave-14","question":"公司原因未安排休年假的补偿标准是多少？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"政策查询"}
+{"id":"leave-15","question":"《【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf》第3页说明了哪些年假审批步骤？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"文件页码过滤"}
+{"id":"leave-16","question":"刚才的年假制度里，离职时未休年假如何处理？","relevant_docs":["【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf"],"relevance_grades":{"【公司官方政策】员工带薪年休假管理办法（RAG知识库专用）.pdf":3},"category":"追问"}
+{"id":"product-01","question":"商品数据明细表包含哪些主要字段？","relevant_docs":["a26fb552_商品数据明细_豆包AI生成.xlsx"],"relevance_grades":{"a26fb552_商品数据明细_豆包AI生成.xlsx":3},"category":"表格字段"}
+{"id":"product-02","question":"商品数据明细.xlsx 中 SP0001 的商品名称是什么？","relevant_docs":["a26fb552_商品数据明细_豆包AI生成.xlsx"],"relevance_grades":{"a26fb552_商品数据明细_豆包AI生成.xlsx":3},"category":"表格查询"}
+{"id":"product-03","question":"SP0001 的品牌、单价和库存数量分别是多少？","relevant_docs":["a26fb552_商品数据明细_豆包AI生成.xlsx"],"relevance_grades":{"a26fb552_商品数据明细_豆包AI生成.xlsx":3},"category":"表格查询"}
+{"id":"product-04","question":"SP0002 是什么商品，当前是否在售？","relevant_docs":["a26fb552_商品数据明细_豆包AI生成.xlsx"],"relevance_grades":{"a26fb552_商品数据明细_豆包AI生成.xlsx":3},"category":"表格查询"}
+{"id":"product-05","question":"SP0003 的商品分类和累计销量是多少？","relevant_docs":["a26fb552_商品数据明细_豆包AI生成.xlsx"],"relevance_grades":{"a26fb552_商品数据明细_豆包AI生成.xlsx":3},"category":"表格查询"}
+{"id":"product-06","question":"SP0004 的名称、规格和状态是什么？","relevant_docs":["a26fb552_商品数据明细_豆包AI生成.xlsx"],"relevance_grades":{"a26fb552_商品数据明细_豆包AI生成.xlsx":3},"category":"表格查询"}
+{"id":"product-07","question":"SP0005 属于什么商品分类？","relevant_docs":["a26fb552_商品数据明细_豆包AI生成.xlsx"],"relevance_grades":{"a26fb552_商品数据明细_豆包AI生成.xlsx":3},"category":"表格查询"}
+{"id":"product-08","question":"SP0006 为什么不能作为在售商品查询？","relevant_docs":["a26fb552_商品数据明细_豆包AI生成.xlsx"],"relevance_grades":{"a26fb552_商品数据明细_豆包AI生成.xlsx":3},"category":"否定问答"}
+{"id":"product-09","question":"在 Sheet 商品数据明细 中，SP0007 的库存数量和状态是什么？","relevant_docs":["a26fb552_商品数据明细_豆包AI生成.xlsx"],"relevance_grades":{"a26fb552_商品数据明细_豆包AI生成.xlsx":3},"category":"Sheet过滤"}
+{"id":"product-10","question":"SP0008 的商品名称与规格型号是什么？","relevant_docs":["a26fb552_商品数据明细_豆包AI生成.xlsx"],"relevance_grades":{"a26fb552_商品数据明细_豆包AI生成.xlsx":3},"category":"表格查询"}
+{"id":"student-01","question":"学生网上评教的第一步是什么？","relevant_docs":["学生网上评教步骤.docx"],"relevance_grades":{"学生网上评教步骤.docx":3},"category":"流程查询"}
+{"id":"student-02","question":"手机端如何找到学生评价入口？","relevant_docs":["学生网上评教步骤.docx"],"relevance_grades":{"学生网上评教步骤.docx":3},"category":"流程查询"}
+{"id":"student-03","question":"电脑端进入学生评价的菜单路径是什么？","relevant_docs":["学生网上评教步骤.docx"],"relevance_grades":{"学生网上评教步骤.docx":3},"category":"流程查询"}
+{"id":"student-04","question":"完成学生评价后还要做什么操作？","relevant_docs":["学生网上评教步骤.docx"],"relevance_grades":{"学生网上评教步骤.docx":3},"category":"流程查询"}
+{"id":"student-05","question":"新版教务系统的网上评教步骤有哪些？","relevant_docs":["学生网上评教步骤.docx"],"relevance_grades":{"学生网上评教步骤.docx":3},"category":"流程查询"}
+{"id":"student-06","question":"刚才说的评教流程最后怎样确认成功？","relevant_docs":["学生网上评教步骤.docx"],"relevance_grades":{"学生网上评教步骤.docx":3},"category":"追问"}
+{"id":"refusal-01","question":"公司老板的生日是哪一天？","relevant_docs":[],"relevance_grades":{},"expected_refusal":true,"category":"知识库无答案"}
+{"id":"refusal-02","question":"请预测下个月苹果耳机的销量。","relevant_docs":[],"relevance_grades":{},"expected_refusal":true,"category":"知识库无答案"}

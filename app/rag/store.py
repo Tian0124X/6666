@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from langchain_core.documents import Document
 
 from app.rag.errors import KnowledgeStoreUnavailable
@@ -47,9 +49,11 @@ def get_document_summaries() -> list[dict]:
         return []
 
 
-def get_vector_search_results(query: str, k: int = 20, fetch_k: int = 30) -> list[Document]:
+def get_vector_search_results(
+    query: str, k: int = 20, fetch_k: int = 30, filters: dict[str, Any] | None = None,
+) -> list[Document]:
     """执行一次融合检索，不再叠加 BM25 或第二套向量数据库。"""
-    return _store().search(query, k=k, fetch_k=fetch_k)
+    return _store().search(query, k=k, fetch_k=fetch_k, filters=filters)
 
 
 def get_evidence(document_id: str, chunk_id: str):

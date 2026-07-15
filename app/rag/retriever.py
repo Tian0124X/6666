@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import re
 import time
+import uuid
+from collections import defaultdict
 from typing import Iterable
 
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.config import settings
+from app.rag.errors import KnowledgeStoreUnavailable
+from app.rag.query_plan import QueryPlan, build_llm_plan, build_rule_plan, is_follow_up
 from app.rag.llm_factory import get_llm
 from app.rag.store import get_vector_search_results
+
+logger = logging.getLogger(__name__)
 
 RAG_SYSTEM_PROMPT = """你是“知识库 RAG”。必须严格依据给定证据回答。
 
@@ -32,7 +40,6 @@ QUERY_EXPANSION_PROMPT = ChatPromptTemplate.from_template(
     """为下列问题生成 3 个不同表达的检索查询，每行一个，不要编号。
 问题：{question}"""
 )
-FOLLOW_UP_MARKERS = ("这个", "那个", "它", "上面", "刚才", "前面", "继续", "分别", "其中")
 
 
 def _chinese_tokenize(text: str) -> list[str]:
@@ -49,41 +56,6 @@ def _chinese_tokenize(text: str) -> list[str]:
         if len(text.strip()) > 1 and " " not in text.strip():
             return list(text)
         return [part for part in re.split(r"\s+", text) if part] or list(text)
-
-
-def _is_follow_up(question: str) -> bool:
-    return len(question.strip()) <= 36 and any(marker in question for marker in FOLLOW_UP_MARKERS)
-
-
-async def _rewrite_follow_up(question: str, history: list[dict] | None) -> tuple[str, float, bool]:
-    """仅将明显追问改写为独立检索问题，普通问题不增加 LLM 往返。"""
-    started = time.perf_counter()
-    if not history or not _is_follow_up(question) or not settings.is_llm_available:
-        return question, 0.0, False
-    context = "\n".join(
-        f"{item.get('role', 'user')}: {str(item.get('content', ''))[:500]}"
-        for item in history[-4:]
-    )
-    prompt = ChatPromptTemplate.from_template(
-        """根据对话历史把最后一个追问改写为可独立检索的一句话。
-只输出改写后的问题，无法判断时原样输出。
-
-历史：
-{history}
-
-追问：{question}"""
-    )
-    try:
-        answer = await asyncio.wait_for(
-            (prompt | get_llm(temperature=0, timeout=2, max_tokens=120)).ainvoke(
-                {"history": context, "question": question}
-            ),
-            timeout=2.5,
-        )
-        rewritten = str(answer.content).strip() or question
-        return rewritten, round((time.perf_counter() - started) * 1000, 1), rewritten != question
-    except Exception:
-        return question, round((time.perf_counter() - started) * 1000, 1), False
 
 
 def build_sources(docs: Iterable[Document]) -> list[dict]:
@@ -144,9 +116,134 @@ def filter_sources_by_citations(answer: str, sources: list[dict]) -> list[dict]:
     return [source for source in sources if source["citation_id"] in cited_ids]
 
 
-async def _hybrid_search(query: str, k: int = 20) -> list[Document]:
+async def _hybrid_search(
+    query: str, k: int = 20, filters: dict | None = None,
+) -> list[Document]:
     """兼容评测接口；内部只执行 pgvector 的单次融合检索。"""
-    return await asyncio.to_thread(get_vector_search_results, query, k, max(30, k))
+    return await asyncio.to_thread(get_vector_search_results, query, k, max(30, k), filters)
+
+
+def _chunk_identity(doc: Document, fallback_index: int) -> str:
+    """以数据库切片身份去重，缺失时才退化为稳定位置身份。"""
+    metadata = doc.metadata
+    return str(
+        metadata.get("chunk_id")
+        or f"{metadata.get('document_id') or metadata.get('source') or metadata.get('filename', 'unknown')}:{metadata.get('chunk_index', fallback_index)}"
+    )
+
+
+def _fuse_query_results(ranked_results: list[list[Document]]) -> list[Document]:
+    """对主问题和有限变体做加权 RRF，主问题始终拥有最高权重。"""
+    by_chunk: dict[str, Document] = {}
+    scores: defaultdict[str, float] = defaultdict(float)
+    for query_index, docs in enumerate(ranked_results):
+        weight = 1.0 if query_index == 0 else 0.65
+        for position, doc in enumerate(docs, start=1):
+            chunk_id = _chunk_identity(doc, position)
+            by_chunk.setdefault(chunk_id, doc)
+            scores[chunk_id] += weight / (60 + position)
+    fused: list[Document] = []
+    for chunk_id in sorted(by_chunk, key=lambda item: (-scores[item], item)):
+        original = by_chunk[chunk_id]
+        metadata = dict(original.metadata)
+        metadata["score"] = round(scores[chunk_id], 8)
+        fused.append(Document(page_content=original.page_content, metadata=metadata))
+    return fused
+
+
+def _limit_document_candidates(docs: list[Document], k: int) -> list[Document]:
+    """防止同一文档的相邻切片挤占最终证据位。"""
+    selected: list[Document] = []
+    per_document: defaultdict[str, int] = defaultdict(int)
+    seen_chunks: set[str] = set()
+    cap = max(1, settings.RAG_QUERY_PLAN_DOCUMENT_CAP)
+    for index, doc in enumerate(docs, start=1):
+        chunk_id = _chunk_identity(doc, index)
+        document_key = str(
+            doc.metadata.get("document_id") or doc.metadata.get("source") or doc.metadata.get("filename") or "unknown"
+        )
+        if chunk_id in seen_chunks or per_document[document_key] >= cap:
+            continue
+        seen_chunks.add(chunk_id)
+        per_document[document_key] += 1
+        selected.append(doc)
+        if len(selected) >= k:
+            break
+    return selected
+
+
+async def _search_query_plan(plan: QueryPlan, k: int) -> tuple[list[Document], int]:
+    """并行检索主问题与变体；任一变体失败时由调用方回退规则计划。"""
+    queries = plan.queries
+    search_k = max(k, settings.RAG_SEARCH_K)
+    results = await asyncio.gather(
+        *[_hybrid_search(query, search_k, plan.filters.to_store_filters()) for query in queries],
+        return_exceptions=True,
+    )
+    failures = [result for result in results if isinstance(result, Exception)]
+    if failures:
+        if isinstance(failures[0], KnowledgeStoreUnavailable):
+            raise failures[0]
+        raise RuntimeError(f"QueryPlan 检索失败: {type(failures[0]).__name__}") from failures[0]
+    ranked_results = [result for result in results if isinstance(result, list)]
+    fused = _fuse_query_results(ranked_results)
+    return _limit_document_candidates(fused, k), len(fused)
+
+
+def _log_query_trace(trace_id: str, plan: QueryPlan, candidate_count: int, timings: dict[str, float]) -> None:
+    """只写入内部结构化摘要，不向 SSE 或用户界面泄漏候选与规划正文。"""
+    logger.info(
+        "rag_query_trace=%s",
+        json.dumps(
+            {
+                "trace_id": trace_id,
+                "plan": plan.trace_summary(),
+                "candidate_count": candidate_count,
+                "timings_ms": timings,
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+
+async def _retrieve_with_query_plan(
+    question: str, k: int, history: list[dict] | None = None,
+) -> tuple[list[Document], int, dict[str, float], int, QueryPlan]:
+    """按需生成 QueryPlan，并保证任一异常都回退到规则单路检索。"""
+    started = time.perf_counter()
+    base_plan = build_rule_plan(question)
+    plan = base_plan
+    trace_id = str(uuid.uuid4())
+    try:
+        if not settings.RAG_QUERY_PLAN_ENABLED:
+            plan.source = "disabled"
+            docs, candidate_count = await _search_query_plan(plan, k)
+        elif is_follow_up(question):
+            plan = await build_llm_plan(question, history, base_plan)
+            docs, candidate_count = await _search_query_plan(plan, k)
+        else:
+            docs, candidate_count = await _search_query_plan(base_plan, k)
+            if candidate_count < max(1, settings.RAG_QUERY_PLAN_MIN_CANDIDATES):
+                plan = await build_llm_plan(question, history, base_plan)
+                if plan.source == "llm" and len(plan.queries) > 1:
+                    docs, candidate_count = await _search_query_plan(plan, k)
+    except KnowledgeStoreUnavailable:
+        raise
+    except Exception as exc:
+        # 回退时保留原问题的显式过滤，不能为了“有结果”而扩大范围。
+        plan = build_rule_plan(question)
+        plan.source = "fallback"
+        plan.fallback_reason = type(exc).__name__
+        docs, candidate_count = await _search_query_plan(plan, k)
+    timings = {
+        "query_plan": plan.planning_ms,
+        "expansion": 0.0,
+        "retrieval": round((time.perf_counter() - started) * 1000, 1),
+        "rerank": 0.0,
+    }
+    timings["total_retrieval"] = timings["retrieval"]
+    _log_query_trace(trace_id, plan, candidate_count, timings)
+    return docs, candidate_count, timings, len(plan.queries), plan
 
 
 def _cross_encoder_rerank(question: str, docs: list[Document], top_n: int = 5) -> list[Document]:
@@ -163,21 +260,13 @@ async def _retrieve_final_documents(
     question: str, k: int, use_expansion: bool, use_rerank: bool
 ) -> tuple[list[Document], int, dict[str, float], int]:
     """测量纯 RAG 检索阶段；查询扩展和在线重排默认关闭。"""
-    started = time.perf_counter()
-    docs = await _hybrid_search(question, k=max(k, settings.RAG_SEARCH_K))
-    timings = {
-        "expansion": 0.0,
-        "retrieval": round((time.perf_counter() - started) * 1000, 1),
-        "rerank": 0.0,
-    }
+    docs, candidate_count, timings, query_count, _ = await _retrieve_with_query_plan(question, k)
     if use_rerank and settings.RAG_ONLINE_RERANK:
         rerank_started = time.perf_counter()
         docs = await asyncio.to_thread(_cross_encoder_rerank, question, docs, k)
         timings["rerank"] = round((time.perf_counter() - rerank_started) * 1000, 1)
-    else:
-        docs = docs[:k]
-    timings["total_retrieval"] = round((time.perf_counter() - started) * 1000, 1)
-    return docs, len(docs), timings, 1
+    # 非流式旧接口的 retrieved_count 一直表示最终返回切片数，不暴露内部候选数。
+    return docs, len(docs), timings, query_count
 
 
 async def _generate_answer_async(question: str, docs: list[Document]) -> tuple[str, list[dict]]:
@@ -216,17 +305,15 @@ async def rag_qa(
 async def rag_qa_stream(question: str, k: int = 5, history: list[dict] | None = None):
     """先发送可点击证据，再逐 token 输出带引用回答。"""
     started = time.perf_counter()
-    rewritten, rewrite_ms, rewritten_flag = await _rewrite_follow_up(question, history)
-    docs, count, timings, query_count = await _retrieve_final_documents(
-        rewritten, k, use_expansion=False, use_rerank=False
-    )
-    timings["query_rewrite"] = rewrite_ms
+    docs, count, timings, query_count, plan = await _retrieve_with_query_plan(question, k, history)
+    rewritten = plan.canonical_query
+    timings["query_rewrite"] = plan.planning_ms
     timings["total_retrieval"] = round((time.perf_counter() - started) * 1000, 1)
     candidate_sources = build_sources(docs)
     yield {
         # 候选仅用于展示过程数量，避免把未采纳文档误导为回答依据。
         "type": "retrieval", "sources": [], "candidate_count": count, "retrieved_count": count,
-        "query_count": query_count, "query_rewritten": rewritten_flag,
+        "query_count": query_count, "query_rewritten": rewritten != question,
         "timings_ms": timings,
     }
     if not docs or not settings.is_llm_available:

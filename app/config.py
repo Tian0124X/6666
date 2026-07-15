@@ -75,6 +75,16 @@ class Settings:
     RAG_ONLINE_RERANK: bool = os.getenv("RAG_ONLINE_RERANK", "false").lower() == "true"
     RAG_EMBEDDING_MODEL: str = os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-m3")
     RAG_EMBEDDING_DIMENSION: int = _int_env("RAG_EMBEDDING_DIMENSION", 1024)
+    # === RAG QueryPlan 与受控召回 ===
+    RAG_QUERY_PLAN_ENABLED: bool = os.getenv("RAG_QUERY_PLAN_ENABLED", "true").lower() == "true"
+    RAG_QUERY_PLAN_VARIANT_LIMIT: int = _int_env("RAG_QUERY_PLAN_VARIANT_LIMIT", 2)
+    RAG_QUERY_PLAN_MIN_CANDIDATES: int = _int_env("RAG_QUERY_PLAN_MIN_CANDIDATES", 3)
+    RAG_QUERY_PLAN_DOCUMENT_CAP: int = _int_env("RAG_QUERY_PLAN_DOCUMENT_CAP", 2)
+    # === RAG 记忆边界 ===
+    RAG_MEMORY_RECENT_TURNS: int = _int_env("RAG_MEMORY_RECENT_TURNS", 6)
+    RAG_MEMORY_SUMMARY_TRIGGER_TURNS: int = _int_env("RAG_MEMORY_SUMMARY_TRIGGER_TURNS", 8)
+    RAG_MEMORY_SUMMARY_SOURCE_TURNS: int = _int_env("RAG_MEMORY_SUMMARY_SOURCE_TURNS", 16)
+    RAG_MEMORY_PREFERENCE_LIMIT: int = _int_env("RAG_MEMORY_PREFERENCE_LIMIT", 5)
     # === MinerU PDF 增强解析 ===
     PDF_PARSER: str = os.getenv("PDF_PARSER", "auto")
     MINERU_OCR: bool = os.getenv("MINERU_OCR", "false").lower() == "true"

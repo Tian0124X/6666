@@ -11,6 +11,7 @@
 支持检索策略对比:
   - vector_only: 纯语义检索
   - hybrid: 向量 + BM25 + RRF 融合
+  - query_plan: QueryPlan 条件过滤 + 按需多路召回
   - hybrid_rerank: 混合 + BGE Cross-Encoder 重排序
 
 用法:
@@ -24,12 +25,13 @@ import asyncio
 import logging
 import math
 import time
+from pathlib import Path
 from typing import List, Dict, Optional, Literal
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-StrategyName = Literal["vector_only", "hybrid", "hybrid_rerank"]
+StrategyName = Literal["vector_only", "hybrid", "query_plan", "hybrid_rerank"]
 
 
 # ============================================================
@@ -45,6 +47,32 @@ def _doc_matches_relevant(doc_source: str, relevant_sources: List[str]) -> bool:
         if rel_name in doc_name or doc_name in rel_name:
             return True
     return False
+
+
+def _unique_sources(sources: List[str]) -> List[str]:
+    """按文件名稳定去重，避免同一文档的多个切片抬高文档级指标。"""
+    import os
+
+    unique: List[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        identity = os.path.basename(source).lower()
+        if identity and identity not in seen:
+            seen.add(identity)
+            unique.append(source)
+    return unique
+
+
+def _matched_relevant_sources(retrieved_sources: List[str], relevant_sources: List[str]) -> set[str]:
+    """返回被命中的不同金标文档，重复切片只计一次。"""
+    import os
+
+    matched: set[str] = set()
+    for source in retrieved_sources:
+        for relevant in relevant_sources:
+            if _doc_matches_relevant(source, [relevant]):
+                matched.add(os.path.basename(relevant).lower())
+    return matched
 
 
 def _binary_relevance(
@@ -64,9 +92,10 @@ def recall_at_k(
     """Recall@K: Top-K 结果中命中相关文档数 / 相关文档总数"""
     if not relevant_sources:
         return 1.0
-    top_k = retrieved_sources[:k]
-    hits = sum(1 for s in top_k if _doc_matches_relevant(s, relevant_sources))
-    return hits / len(relevant_sources)
+    top_k = _unique_sources(retrieved_sources[:k])
+    relevant_count = len({source.lower() for source in relevant_sources})
+    hits = len(_matched_relevant_sources(top_k, relevant_sources))
+    return hits / relevant_count
 
 
 def precision_at_k(
@@ -77,7 +106,7 @@ def precision_at_k(
     """Precision@K: Top-K 中相关文档数 / K"""
     if k <= 0:
         return 0.0
-    top_k = retrieved_sources[:k]
+    top_k = _unique_sources(retrieved_sources[:k])
     hits = sum(1 for s in top_k if _doc_matches_relevant(s, relevant_sources))
     return hits / k
 
@@ -175,6 +204,14 @@ async def _retrieve_hybrid(query: str, k: int = 20) -> List:
     return await _hybrid_search(query, k=k)
 
 
+async def _retrieve_query_plan(query: str, k: int = 20) -> List:
+    """评测实际的 QueryPlan 链路，包含显式过滤与按需多路召回。"""
+    from app.rag.retriever import _retrieve_with_query_plan
+
+    docs, _, _, _, _ = await _retrieve_with_query_plan(query, k)
+    return docs
+
+
 async def _retrieve_hybrid_rerank(query: str, k: int = 20, top_n: int = 5) -> List:
     """混合检索 + BGE Cross-Encoder 重排序"""
     from app.rag.retriever import _hybrid_search, _cross_encoder_rerank
@@ -192,6 +229,10 @@ STRATEGIES: Dict[StrategyName, dict] = {
     "hybrid": {
         "name": "混合检索 (向量+BM25+RRF)",
         "func": _retrieve_hybrid,
+    },
+    "query_plan": {
+        "name": "QueryPlan 受控多路召回",
+        "func": _retrieve_query_plan,
     },
     "hybrid_rerank": {
         "name": "混合检索 + BGE Reranker",
@@ -237,6 +278,7 @@ async def run_retrieval_eval(
     strategy: StrategyName = "hybrid_rerank",
     k_values: List[int] = None,
     verbose: bool = True,
+    testset: List[dict] | None = None,
 ) -> RetrievalEvalResult:
     """
     运行检索质量测评。
@@ -255,7 +297,7 @@ async def run_retrieval_eval(
         k_values = [5, 10, 20]
 
     # 筛选有 relevant_docs 标注的测试用例
-    testset = [t for t in RAG_TESTSET if t.get("relevant_docs")]
+    testset = [t for t in (testset or RAG_TESTSET) if t.get("relevant_docs")]
     if not testset:
         logger.warning("测试集中没有 relevant_docs 标注，跳过检索测评")
         return RetrievalEvalResult(strategy=strategy)
@@ -283,14 +325,16 @@ async def run_retrieval_eval(
         latencies.append(latency)
 
         # 提取文档来源
-        sources = [d.metadata.get("source", d.metadata.get("filename", "")) for d in docs]
+        sources = _unique_sources([
+            d.metadata.get("filename") or d.metadata.get("source", "") for d in docs
+        ])
 
         all_retrieved.append(sources)
         all_relevant.append(relevant_docs)
         all_relevance_maps.append(relevance_grades)
 
         if verbose:
-            hits_5 = sum(1 for s in sources[:5] if _doc_matches_relevant(s, relevant_docs))
+            hits_5 = len(_matched_relevant_sources(sources[:5], relevant_docs))
             logger.info(f"  {item['id']}: {hits_5}/{len(relevant_docs)} hits@5 "
                          f"({latency:.0f}ms) [{strategy}]")
 
@@ -346,6 +390,7 @@ async def run_retrieval_compare(
     strategies: List[StrategyName] = None,
     k_values: List[int] = None,
     verbose: bool = True,
+    testset: List[dict] | None = None,
 ) -> RetrievalCompareReport:
     """
     对比多种检索策略。
@@ -359,12 +404,14 @@ async def run_retrieval_compare(
         RetrievalCompareReport
     """
     if strategies is None:
-        strategies = ["vector_only", "hybrid", "hybrid_rerank"]
+        strategies = ["vector_only", "hybrid", "query_plan", "hybrid_rerank"]
 
     report = RetrievalCompareReport()
     for strat in strategies:
         logger.info(f"\n--- 运行策略: {STRATEGIES[strat]['name']} ---")
-        result = await run_retrieval_eval(strategy=strat, k_values=k_values, verbose=verbose)
+        result = await run_retrieval_eval(
+            strategy=strat, k_values=k_values, verbose=verbose, testset=testset
+        )
         report.results.append(result)
 
     # 打印对比表
@@ -422,10 +469,21 @@ if __name__ == "__main__":
         if idx + 1 < len(sys.argv):
             strategy = sys.argv[idx + 1]
 
+    dataset_path = None
+    if len(sys.argv) > 1 and "--dataset" in sys.argv:
+        idx = sys.argv.index("--dataset")
+        if idx + 1 < len(sys.argv):
+            dataset_path = Path(sys.argv[idx + 1])
+
     async def main():
+        testset = None
+        if dataset_path is not None:
+            from app.eval.golden_dataset import load_golden_dataset
+
+            testset = load_golden_dataset(dataset_path)
         if strategy == "all":
-            await run_retrieval_compare()
+            await run_retrieval_compare(testset=testset)
         else:
-            await run_retrieval_eval(strategy=strategy)
+            await run_retrieval_eval(strategy=strategy, testset=testset)
 
     asyncio.run(main())

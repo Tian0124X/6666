@@ -7,6 +7,7 @@ import logging
 import re
 import uuid
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Iterable
 
 from langchain_core.documents import Document
@@ -103,11 +104,33 @@ class PGVectorStore:
                 """CREATE INDEX IF NOT EXISTS idx_vector_documents_fts
                    ON vector_documents USING GIN (search_vector)"""
             )
+            # QueryPlan 的显式过滤条件需要独立索引，避免退化为全表扫描。
+            cur.execute(
+                """CREATE INDEX IF NOT EXISTS idx_vector_documents_filename
+                   ON vector_documents (filename)"""
+            )
+            cur.execute(
+                """CREATE INDEX IF NOT EXISTS idx_vector_documents_file_type
+                   ON vector_documents ((metadata ->> 'file_type'))"""
+            )
+            cur.execute(
+                """CREATE INDEX IF NOT EXISTS idx_vector_documents_sheet
+                   ON vector_documents ((metadata ->> 'sheet'))"""
+            )
+            cur.execute(
+                """CREATE INDEX IF NOT EXISTS idx_vector_documents_page
+                   ON vector_documents (((metadata ->> 'page')::integer))
+                   WHERE (metadata ->> 'page') ~ '^[0-9]+$'"""
+            )
             try:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
                 cur.execute(
                     """CREATE INDEX IF NOT EXISTS idx_vector_documents_content_trgm
                        ON vector_documents USING GIN (content gin_trgm_ops)"""
+                )
+                cur.execute(
+                    """CREATE INDEX IF NOT EXISTS idx_vector_documents_filename_trgm
+                       ON vector_documents USING GIN (filename gin_trgm_ops)"""
                 )
             except Exception as exc:
                 logger.info("未创建 trigram 索引，继续使用全文索引: %s", exc)
@@ -203,20 +226,63 @@ class PGVectorStore:
             terms = [query.strip()] if query.strip() else []
         return list(dict.fromkeys(terms))[:6]
 
-    def search(self, query: str, k: int = 5, fetch_k: int = 30) -> list[Document]:
+    @staticmethod
+    def _build_filter_clause(filters: dict[str, Any] | None) -> tuple[str, list[Any]]:
+        """构建固定字段的参数化过滤 SQL，禁止将用户输入拼入语句。"""
+        filters = filters or {}
+        clauses: list[str] = []
+        params: list[Any] = []
+        filenames = [str(name) for name in filters.get("filenames", []) if str(name).strip()][:3]
+        if filenames:
+            filename_conditions: list[str] = []
+            for filename in filenames:
+                # 保留用户输入中的普通字符，转义 LIKE 通配符后才允许包含匹配。
+                terms = [filename]
+                stem = Path(filename).stem.strip()
+                if len(stem) >= 2 and stem != filename:
+                    terms.append(stem)
+                like_conditions: list[str] = []
+                for term in terms:
+                    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    like_conditions.append("filename ILIKE %s ESCAPE '\\'")
+                    params.append(f"%{escaped}%")
+                filename_conditions.append("(filename = %s OR " + " OR ".join(like_conditions) + ")")
+                exact_index = len(params) - len(like_conditions)
+                params.insert(exact_index, filename)
+            clauses.append("(" + " OR ".join(filename_conditions) + ")")
+        page_start = filters.get("page_start")
+        page_end = filters.get("page_end")
+        if isinstance(page_start, int) and isinstance(page_end, int):
+            page_expression = "(metadata ->> 'page')"
+            clauses.append(f"({page_expression} ~ '^[0-9]+$' AND {page_expression}::integer BETWEEN %s AND %s)")
+            params.extend([min(page_start, page_end), max(page_start, page_end)])
+        sheet = filters.get("sheet")
+        if isinstance(sheet, str) and sheet.strip():
+            clauses.append("metadata ->> 'sheet' = %s")
+            params.append(sheet.strip())
+        file_types = [str(file_type).lower() for file_type in filters.get("file_types", []) if str(file_type).strip()]
+        if file_types:
+            clauses.append("metadata ->> 'file_type' = ANY(%s)")
+            params.append(file_types)
+        return (" AND ".join(clauses) if clauses else "TRUE"), params
+
+    def search(
+        self, query: str, k: int = 5, fetch_k: int = 30, filters: dict[str, Any] | None = None,
+    ) -> list[Document]:
         """执行一次向量与关键词召回，再以 RRF 融合。"""
         self.ensure_embedding_dimension()
         self.ensure_schema()
         embedding = self.embedder.embed_query(query)
+        filter_clause, filter_params = self._build_filter_clause(filters)
         cur = self.conn.cursor()
         try:
             cur.execute(
                 """SELECT id::text, content, metadata, source, filename,
                           1 - (embedding <=> %s::vector) AS raw_score
-                   FROM vector_documents
+                   FROM vector_documents WHERE """ + filter_clause + """
                    ORDER BY embedding <=> %s::vector
                    LIMIT %s""",
-                (embedding, embedding, fetch_k),
+                [embedding, *filter_params, embedding, fetch_k],
             )
             vector_rows = cur.fetchall()
             terms = self._keyword_terms(query)
@@ -226,11 +292,11 @@ class PGVectorStore:
                     """SELECT id::text, content, metadata, source, filename,
                               ts_rank(search_vector, websearch_to_tsquery('simple', %s)) AS raw_score
                        FROM vector_documents
-                       WHERE search_vector @@ websearch_to_tsquery('simple', %s)
-                          OR content ILIKE ANY(%s)
+                       WHERE (search_vector @@ websearch_to_tsquery('simple', %s)
+                          OR content ILIKE ANY(%s)) AND """ + filter_clause + """
                        ORDER BY raw_score DESC, chunk_index ASC
                        LIMIT %s""",
-                    (query, query, patterns, fetch_k),
+                    [query, query, patterns, *filter_params, fetch_k],
                 )
                 keyword_rows = cur.fetchall()
             else:

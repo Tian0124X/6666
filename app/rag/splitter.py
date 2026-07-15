@@ -68,11 +68,13 @@ CHUNK_PRESETS = {
 def get_preset_for_type(file_type: str) -> dict:
     """根据文档类型选择最佳分块策略"""
     file_type = file_type.lower().lstrip(".")
+    if file_type == "pdf_mineru":
+        return CHUNK_PRESETS["pdf_mineru"]
     if file_type in ("pdf",):
         return CHUNK_PRESETS["pdf"]
     if file_type in ("docx", "doc"):
         return CHUNK_PRESETS["docx"]
-    if file_type in ("xlsx", "xls", "csv"):
+    if file_type in ("xlsx", "xls", "csv", "excel"):
         return CHUNK_PRESETS["excel"]
     if file_type in ("py", "js", "ts", "java", "go", "rs", "cpp", "c", "sh"):
         return CHUNK_PRESETS["code"]
@@ -144,8 +146,8 @@ def create_chinese_splitter(
 
 def split_documents(
     documents: List[Document],
-    chunk_size: int = 500,
-    chunk_overlap: int = 150,
+    chunk_size: Optional[int] = None,
+    chunk_overlap: Optional[int] = None,
 ) -> List[Document]:
     """
     将文档列表分块。
@@ -154,13 +156,24 @@ def split_documents(
     - chunk_id: 序号
     - chunk_preview: 前 100 字符预览
     """
+    # 未传自定义参数时按文档类型选择分块策略；保留旧接口的显式覆盖能力。
+    use_document_presets = chunk_size is None and chunk_overlap is None
+    default_chunk_size = 500 if chunk_size is None else chunk_size
+    default_chunk_overlap = 150 if chunk_overlap is None else chunk_overlap
+
     # 检查是否为 MinerU 输出的 Markdown PDF
     is_mineru_pdf = any(
         doc.metadata.get("parser") == "mineru" and doc.metadata.get("file_type") == "pdf"
         for doc in documents
     )
-    splitter = create_chinese_splitter(chunk_size, chunk_overlap)
-    chunks = splitter.split_documents(documents)
+    chunks = []
+    for document in documents:
+        splitter = (
+            create_splitter_for_document(document)
+            if use_document_presets
+            else create_chinese_splitter(default_chunk_size, default_chunk_overlap)
+        )
+        chunks.extend(splitter.split_documents([document]))
 
     # 对 MinerU 的 Markdown 表格做后保护
     if is_mineru_pdf and len(chunks) > 1:
