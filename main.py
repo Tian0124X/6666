@@ -20,7 +20,7 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
-_model_status = {"embedding": False}
+_model_status = {"embedding": False, "reranker": False}
 
 
 class TokenBucket:
@@ -53,6 +53,16 @@ def _warm_models() -> None:
         logger.info("知识库 RAG embedding 预热完成")
     except Exception as exc:
         logger.warning("embedding 预热失败，首次请求将重试: %s", exc)
+
+    if settings.RAG_ONLINE_RERANK:
+        try:
+            from app.rag.reranker import get_reranker
+
+            get_reranker()
+            _model_status["reranker"] = True
+            logger.info("知识库 RAG reranker 预热完成")
+        except Exception as exc:
+            logger.warning("reranker 预热失败，线上请求将回退 RRF: %s", exc)
 
 
 @asynccontextmanager
@@ -106,4 +116,9 @@ async def root():
 
 @app.get("/api/health", tags=["系统"])
 async def health_check():
-    return {"status": "ok", "version": "2.0.0", "embedding_ready": _model_status["embedding"]}
+    return {
+        "status": "ok",
+        "version": "2.0.0",
+        "embedding_ready": _model_status["embedding"],
+        "reranker_ready": _model_status["reranker"],
+    }

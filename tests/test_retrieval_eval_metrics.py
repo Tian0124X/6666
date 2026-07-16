@@ -19,3 +19,4 @@ def test_query_plan_strategy_is_registered_for_real_comparison():
     from app.eval.retrieval_eval import STRATEGIES
 
     assert "query_plan" in STRATEGIES
+    assert "query_plan_rerank" in STRATEGIES

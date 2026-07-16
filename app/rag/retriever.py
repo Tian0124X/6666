@@ -15,10 +15,14 @@ from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.config import settings
+from app.rag.context_builder import context_builder
 from app.rag.errors import KnowledgeStoreUnavailable
 from app.rag.query_plan import QueryPlan, build_llm_plan, build_rule_plan, is_follow_up
+from app.rag.reranker import RerankerUnavailable, rerank_documents
 from app.rag.llm_factory import get_llm
-from app.rag.store import get_vector_search_results
+from app.rag.store import get_evidence, get_vector_search_results
+from app.rag.trust import REFUSAL_ANSWER, has_sufficient_evidence, has_valid_citation_coverage, requires_refusal
+from app.rag.trace import record_rag_trace
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +33,9 @@ RAG_SYSTEM_PROMPT = """你是“知识库 RAG”。必须严格依据给定证�
 2. 每个关键结论后必须使用 [S1]、[S2] 这类引用标记。
 3. 若证据不足，直接回答“资料不足，无法依据当前知识库确认。”，即“我无法回答”。
 4. 只使用给出的引用编号，不能创造新的编号。
+5. 每个包含事实性结论的完整句子都必须附带至少一个引用。
+6. 默认每行只输出一条结论，严格使用“结论 [S1]。”格式；不要输出未引用的开场白、解释性过渡语或总结。
+7. 回答有多条结论时，每一行都要独立附上对应引用，不能把引用留到下一句或最后一行。
 """
 RAG_USER_PROMPT = """用户问题：{question}
 
@@ -83,29 +90,86 @@ def build_sources(docs: Iterable[Document]) -> list[dict]:
 
 
 def _format_context(docs: list[Document]) -> str:
-    """按证据预算组织上下文，并保留与 UI 一致的引用编号。"""
-    sources = build_sources(docs)
-    parts = []
-    for source, doc in zip(sources, docs):
-        location = source["filename"]
-        if source["page"] is not None:
-            location += f"，第{source['page']}页"
-        parts.append(f"[{source['citation_id']}] {location}\n{doc.page_content[:1200]}")
-    return "\n\n---\n\n".join(parts)
+    """兼容旧调用：按 ContextBuilder 全局预算组织引用上下文。"""
+    return context_builder.build(docs).context
+
+
+def _build_context(docs: list[Document]) -> tuple[list[Document], str]:
+    """返回真正进入模型的证据及其上下文，避免未入模切片被引用。"""
+    result = context_builder.build(docs)
+    return result.documents, result.context
+
+
+async def _expand_adjacent_documents(question: str, docs: list[Document]) -> list[Document]:
+    """为最高价值切片补取相邻块，避免表格或条款跨分块时丢失关键行。"""
+    query_terms = [
+        term for term in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9][A-Za-z0-9_.-]{1,}", question.lower())
+        if len(term) >= 2
+    ]
+    # 当前环境的分词器可能将中文全部拆成单字；双字词项能稳定保留条款关键词。
+    for segment in re.findall(r"[\u4e00-\u9fff]{2,}", question):
+        query_terms.extend(segment[index:index + 2] for index in range(len(segment) - 1))
+
+    def score_with_query_terms(content: str, base_score: float) -> float:
+        """为主命中和相邻块统一补充轻量词项信号，避免相邻块反超主命中。"""
+        term_hits = sum(term in content.lower() for term in query_terms)
+        return base_score + term_hits * 0.01
+
+    expanded: list[Document] = []
+    seen_ids: set[str] = set()
+    for doc in docs:
+        metadata = dict(doc.metadata)
+        retrieval_score = float(metadata.get("rerank_score", metadata.get("score", 0.0)) or 0.0)
+        metadata["retrieval_score"] = retrieval_score
+        metadata["score"] = score_with_query_terms(
+            doc.page_content,
+            retrieval_score,
+        )
+        expanded.append(Document(page_content=doc.page_content, metadata=metadata))
+        seen_ids.add(str(metadata.get("chunk_id", "")))
+
+    for doc in expanded[:2]:
+        metadata = doc.metadata
+        document_id = metadata.get("document_id")
+        chunk_id = metadata.get("chunk_id")
+        if not document_id or not chunk_id:
+            continue
+        try:
+            evidence = await asyncio.to_thread(get_evidence, str(document_id), str(chunk_id))
+        except Exception:
+            continue
+        if not evidence:
+            continue
+        base_score = float(metadata.get("rerank_score", metadata.get("retrieval_score", metadata.get("score", 0.0))) or 0.0)
+        current_index = int(metadata.get("chunk_index", 0))
+        for nearby in evidence.get("nearby", []):
+            nearby_id = str(nearby.get("chunk_id", ""))
+            if not nearby_id or nearby_id in seen_ids:
+                continue
+            nearby_metadata = dict(metadata)
+            content = str(nearby.get("content", ""))
+            nearby_metadata.update({
+                "chunk_id": nearby_id,
+                "chunk_index": nearby.get("chunk_index", current_index),
+                "page": nearby.get("page", metadata.get("page")),
+                "score": score_with_query_terms(content, base_score) - 0.0001 * max(1, abs(int(nearby.get("chunk_index", current_index)) - current_index)),
+                "adjacent_expansion": True,
+            })
+            expanded.append(Document(page_content=content, metadata=nearby_metadata))
+            seen_ids.add(nearby_id)
+    return expanded
 
 
 def _fallback_answer(sources: list[dict]) -> str:
     if not sources:
-        return "资料不足，无法依据当前知识库确认。"
+        return REFUSAL_ANSWER
     source_list = "、".join(f"[{source['citation_id']}]" for source in sources[:3])
     return f"已找到与问题相关的知识库证据，请查看引用来源：{source_list}"
 
 
 def _validate_citations(answer: str, sources: list[dict]) -> str:
-    """拒绝无效引用；无有效引文时返回可核查的保守答复。"""
-    valid = {source["citation_id"] for source in sources}
-    used = set(re.findall(r"\[(S\d+)\]", answer))
-    if not used or not used.issubset(valid):
+    """拒绝无效事实结论；降级为仅展示可核查的证据来源。"""
+    if not has_valid_citation_coverage(answer, sources):
         return _fallback_answer(sources)
     return answer.strip()
 
@@ -172,6 +236,27 @@ def _limit_document_candidates(docs: list[Document], k: int) -> list[Document]:
     return selected
 
 
+def _has_sufficient_evidence_support(question: str, docs: list[Document]) -> bool:
+    """识别候选数量充足但缺少问题关键语义的弱信号检索。"""
+    if len(question.strip()) < 12:
+        return True
+    try:
+        import jieba
+
+        terms = [term.strip().lower() for term in jieba.cut(question)]
+    except Exception:
+        terms = re.findall(r"[A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,}", question.lower())
+    for segment in re.findall(r"[\u4e00-\u9fff]{2,}", question):
+        terms.extend(segment[index:index + 2] for index in range(len(segment) - 1))
+    ignored = {"请问", "多少", "什么", "怎么", "如何", "可以", "是否", "一个", "这个", "问题"}
+    meaningful = list(dict.fromkeys(term for term in terms if len(term) >= 2 and term not in ignored))
+    if len(meaningful) < 3:
+        return True
+    evidence = "\n".join(doc.page_content for doc in docs).lower()
+    hits = sum(term in evidence for term in meaningful)
+    return hits >= min(max(1, settings.RAG_QUERY_PLAN_MIN_TERM_HITS), len(meaningful))
+
+
 async def _search_query_plan(plan: QueryPlan, k: int) -> tuple[list[Document], int]:
     """并行检索主问题与变体；任一变体失败时由调用方回退规则计划。"""
     queries = plan.queries
@@ -214,6 +299,7 @@ async def _retrieve_with_query_plan(
     base_plan = build_rule_plan(question)
     plan = base_plan
     trace_id = str(uuid.uuid4())
+    plan.trace_id = trace_id
     try:
         if not settings.RAG_QUERY_PLAN_ENABLED:
             plan.source = "disabled"
@@ -223,7 +309,8 @@ async def _retrieve_with_query_plan(
             docs, candidate_count = await _search_query_plan(plan, k)
         else:
             docs, candidate_count = await _search_query_plan(base_plan, k)
-            if candidate_count < max(1, settings.RAG_QUERY_PLAN_MIN_CANDIDATES):
+            weak_signal = candidate_count < max(1, settings.RAG_QUERY_PLAN_MIN_CANDIDATES) or not _has_sufficient_evidence_support(question, docs)
+            if weak_signal:
                 plan = await build_llm_plan(question, history, base_plan)
                 if plan.source == "llm" and len(plan.queries) > 1:
                     docs, candidate_count = await _search_query_plan(plan, k)
@@ -242,13 +329,14 @@ async def _retrieve_with_query_plan(
         "rerank": 0.0,
     }
     timings["total_retrieval"] = timings["retrieval"]
+    plan.trace_id = trace_id
     _log_query_trace(trace_id, plan, candidate_count, timings)
     return docs, candidate_count, timings, len(plan.queries), plan
 
 
 def _cross_encoder_rerank(question: str, docs: list[Document], top_n: int = 5) -> list[Document]:
-    """默认不在线重排；仅在显式配置后由评测或 GPU 环境接管。"""
-    return docs[:top_n]
+    """使用本地 Cross-Encoder 将候选重排为最终证据。"""
+    return rerank_documents(question, docs, top_n)
 
 
 def _llm_rerank(question: str, docs: list[Document], top_n: int = 5) -> list[Document]:
@@ -256,34 +344,68 @@ def _llm_rerank(question: str, docs: list[Document], top_n: int = 5) -> list[Doc
     return _cross_encoder_rerank(question, docs, top_n)
 
 
+async def _apply_online_rerank(question: str, docs: list[Document], top_n: int) -> tuple[list[Document], float]:
+    """在线重排受开关、候选阈值和超时保护，任何异常均回退 RRF 顺序。"""
+    if not settings.RAG_ONLINE_RERANK or len(docs) < max(1, settings.RAG_RERANK_MIN_CANDIDATES):
+        return docs[:top_n], 0.0
+    started = time.perf_counter()
+    try:
+        ranked = await asyncio.wait_for(
+            asyncio.to_thread(_cross_encoder_rerank, question, docs, top_n),
+            timeout=max(1, settings.RAG_RERANK_TIMEOUT_MS) / 1000,
+        )
+        return ranked, round((time.perf_counter() - started) * 1000, 1)
+    except Exception as exc:
+        logger.warning("在线 Rerank 失败，回退 RRF 顺序: %s", type(exc).__name__)
+        return docs[:top_n], round((time.perf_counter() - started) * 1000, 1)
+
+
 async def _retrieve_final_documents(
     question: str, k: int, use_expansion: bool, use_rerank: bool
 ) -> tuple[list[Document], int, dict[str, float], int]:
     """测量纯 RAG 检索阶段；查询扩展和在线重排默认关闭。"""
-    docs, candidate_count, timings, query_count, _ = await _retrieve_with_query_plan(question, k)
+    candidate_k = max(k, settings.RAG_RERANK_CANDIDATE_K) if use_rerank else k
+    docs, candidate_count, timings, query_count, plan = await _retrieve_with_query_plan(question, candidate_k)
+    timings["_trace"] = {"trace_id": plan.trace_id or str(uuid.uuid4()), "plan": plan}
     if use_rerank and settings.RAG_ONLINE_RERANK:
-        rerank_started = time.perf_counter()
-        docs = await asyncio.to_thread(_cross_encoder_rerank, question, docs, k)
-        timings["rerank"] = round((time.perf_counter() - rerank_started) * 1000, 1)
+        docs, timings["rerank"] = await _apply_online_rerank(question, docs, k)
+    else:
+        docs = docs[:k]
     # 非流式旧接口的 retrieved_count 一直表示最终返回切片数，不暴露内部候选数。
     return docs, len(docs), timings, query_count
 
 
-async def _generate_answer_async(question: str, docs: list[Document]) -> tuple[str, list[dict]]:
-    sources = build_sources(docs)
-    if not docs or not settings.is_llm_available:
+async def _generate_answer_async(
+    question: str, docs: list[Document], evidence_query: str | None = None,
+) -> tuple[str, list[dict]]:
+    """生成答案时以用户原问题校验，以受控检索查询补齐相邻证据。"""
+    if requires_refusal(question):
+        return REFUSAL_ANSWER, []
+    docs = await _expand_adjacent_documents(evidence_query or question, docs)
+    context_docs, context = _build_context(docs)
+    sources = build_sources(context_docs)
+    if not has_sufficient_evidence(context_docs, context, question):
+        return REFUSAL_ANSWER, []
+    if not settings.is_llm_available:
         answer = _fallback_answer(sources)
         return answer, filter_sources_by_citations(answer, sources)
     chain = ChatPromptTemplate.from_messages([
         ("system", RAG_SYSTEM_PROMPT), ("user", RAG_USER_PROMPT),
     ]) | get_llm(temperature=0.1)
     try:
-        response = await chain.ainvoke({"question": question, "context": _format_context(docs)})
-        answer = _validate_citations(str(response.content), sources)
+        response = await chain.ainvoke({"question": question, "context": context})
+        answer = str(response.content).strip()
+        if not has_valid_citation_coverage(answer, sources) and settings.RAG_TRUST_REGENERATION_ENABLED:
+            repair_chain = ChatPromptTemplate.from_messages([
+                ("system", RAG_SYSTEM_PROMPT + "\n上一版未通过引用覆盖检查。仅按“结论 [S#]。”逐行重写；禁止任何未引用文字。"),
+                ("user", RAG_USER_PROMPT),
+            ]) | get_llm(temperature=0.1)
+            repaired = await repair_chain.ainvoke({"question": question, "context": context})
+            answer = str(repaired.content).strip()
+        answer = _validate_citations(answer, sources)
         return answer, filter_sources_by_citations(answer, sources)
     except Exception:
-        answer = _fallback_answer(sources)
-        return answer, filter_sources_by_citations(answer, sources)
+        return REFUSAL_ANSWER, []
 
 
 async def rag_qa(
@@ -291,11 +413,20 @@ async def rag_qa(
 ) -> dict:
     """非流式纯 RAG 问答入口。"""
     started = time.perf_counter()
-    docs, count, timings, query_count = await _retrieve_final_documents(question, k, use_expansion, use_rerank)
+    docs, count, timings, query_count = await _retrieve_final_documents(
+        question, k, use_expansion, use_rerank or settings.RAG_ONLINE_RERANK
+    )
+    trace = timings.pop("_trace", {})
+    plan = trace.get("plan") or build_rule_plan(question)
+    evidence_query = "\n".join(plan.queries)
     generation_started = time.perf_counter()
-    answer, sources = await _generate_answer_async(question, docs)
+    answer, sources = await _generate_answer_async(question, docs, evidence_query)
     timings["generation"] = round((time.perf_counter() - generation_started) * 1000, 1)
     timings["total"] = round((time.perf_counter() - started) * 1000, 1)
+    record_rag_trace(
+        trace.get("trace_id", str(uuid.uuid4())), question, plan,
+        count, sources, answer, timings,
+    )
     return {
         "answer": answer, "sources": sources, "retrieved_count": count,
         "query_count": query_count, "timings_ms": timings,
@@ -305,10 +436,18 @@ async def rag_qa(
 async def rag_qa_stream(question: str, k: int = 5, history: list[dict] | None = None):
     """先发送可点击证据，再逐 token 输出带引用回答。"""
     started = time.perf_counter()
-    docs, count, timings, query_count, plan = await _retrieve_with_query_plan(question, k, history)
+    candidate_k = max(k, settings.RAG_RERANK_CANDIDATE_K) if settings.RAG_ONLINE_RERANK else k
+    docs, count, timings, query_count, plan = await _retrieve_with_query_plan(question, candidate_k, history)
+    if settings.RAG_ONLINE_RERANK:
+        docs, timings["rerank"] = await _apply_online_rerank(question, docs, k)
+    else:
+        docs = docs[:k]
     rewritten = plan.canonical_query
     timings["query_rewrite"] = plan.planning_ms
     timings["total_retrieval"] = round((time.perf_counter() - started) * 1000, 1)
+    evidence_query = "\n".join(plan.queries)
+    docs = await _expand_adjacent_documents(evidence_query, docs)
+    docs, context = _build_context(docs)
     candidate_sources = build_sources(docs)
     yield {
         # 候选仅用于展示过程数量，避免把未采纳文档误导为回答依据。
@@ -316,7 +455,11 @@ async def rag_qa_stream(question: str, k: int = 5, history: list[dict] | None = 
         "query_count": query_count, "query_rewritten": rewritten != question,
         "timings_ms": timings,
     }
-    if not docs or not settings.is_llm_available:
+    if requires_refusal(rewritten) or not has_sufficient_evidence(docs, context, rewritten):
+        answer = REFUSAL_ANSWER
+        accepted_sources = []
+        yield {"type": "content", "content": answer}
+    elif not settings.is_llm_available:
         answer = _fallback_answer(candidate_sources)
         accepted_sources = filter_sources_by_citations(answer, candidate_sources)
         yield {"type": "content", "content": answer}
@@ -327,21 +470,33 @@ async def rag_qa_stream(question: str, k: int = 5, history: list[dict] | None = 
         ]) | get_llm(temperature=0.1)
         answer_parts: list[str] = []
         try:
-            async for chunk in chain.astream({"question": rewritten, "context": _format_context(docs)}):
+            async for chunk in chain.astream({"question": rewritten, "context": context}):
                 content = str(getattr(chunk, "content", ""))
                 if content:
                     answer_parts.append(content)
                     yield {"type": "content", "content": content}
-            validated = _validate_citations("".join(answer_parts), candidate_sources)
+            raw_answer = "".join(answer_parts).strip()
+            validated = _validate_citations(raw_answer, candidate_sources)
+            if not has_valid_citation_coverage(raw_answer, candidate_sources) and settings.RAG_TRUST_REGENERATION_ENABLED:
+                repair_chain = ChatPromptTemplate.from_messages([
+                    ("system", RAG_SYSTEM_PROMPT + "\n上一版未通过引用覆盖检查。仅按“结论 [S#]。”逐行重写；禁止任何未引用文字。"),
+                    ("user", RAG_USER_PROMPT),
+                ]) | get_llm(temperature=0.1)
+                repaired = await repair_chain.ainvoke({"question": rewritten, "context": context})
+                validated = _validate_citations(str(repaired.content).strip(), candidate_sources)
             if validated != "".join(answer_parts).strip():
                 # 先流式展示，再以合法引用版本原子替换最终答案。
                 yield {"type": "replace_content", "content": validated}
             answer = validated
         except Exception:
-            answer = _fallback_answer(candidate_sources)
+            answer = REFUSAL_ANSWER
             yield {"type": "content", "content": answer}
         timings["generation"] = round((time.perf_counter() - generation_started) * 1000, 1)
     timings["total"] = round((time.perf_counter() - started) * 1000, 1)
+    record_rag_trace(
+        plan.trace_id or str(uuid.uuid4()), question, plan, count,
+        filter_sources_by_citations(answer, candidate_sources), answer, timings,
+    )
     yield {
         "type": "done", "sources": filter_sources_by_citations(answer, candidate_sources),
         "candidate_count": count, "timings_ms": timings,

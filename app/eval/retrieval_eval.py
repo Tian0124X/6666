@@ -13,6 +13,7 @@
   - hybrid: 向量 + BM25 + RRF 融合
   - query_plan: QueryPlan 条件过滤 + 按需多路召回
   - hybrid_rerank: 混合 + BGE Cross-Encoder 重排序
+  - query_plan_rerank: QueryPlan + BGE Cross-Encoder 重排序
 
 用法:
   python -m app.eval.retrieval_eval              # 运行全部对比
@@ -31,7 +32,7 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-StrategyName = Literal["vector_only", "hybrid", "query_plan", "hybrid_rerank"]
+StrategyName = Literal["vector_only", "hybrid", "query_plan", "hybrid_rerank", "query_plan_rerank"]
 
 
 # ============================================================
@@ -221,6 +222,16 @@ async def _retrieve_hybrid_rerank(query: str, k: int = 20, top_n: int = 5) -> Li
     return docs
 
 
+async def _retrieve_query_plan_rerank(query: str, k: int = 20) -> List:
+    """用真实 QueryPlan 候选和 Cross-Encoder 执行离线重排。"""
+    from app.config import settings
+    from app.rag.retriever import _cross_encoder_rerank, _retrieve_with_query_plan
+
+    candidate_k = max(k, settings.RAG_RERANK_CANDIDATE_K)
+    docs, _, _, _, _ = await _retrieve_with_query_plan(query, candidate_k)
+    return await asyncio.to_thread(_cross_encoder_rerank, query, docs, k)
+
+
 STRATEGIES: Dict[StrategyName, dict] = {
     "vector_only": {
         "name": "纯向量检索",
@@ -237,6 +248,10 @@ STRATEGIES: Dict[StrategyName, dict] = {
     "hybrid_rerank": {
         "name": "混合检索 + BGE Reranker",
         "func": _retrieve_hybrid_rerank,
+    },
+    "query_plan_rerank": {
+        "name": "QueryPlan + BGE Reranker",
+        "func": _retrieve_query_plan_rerank,
     },
 }
 
@@ -404,7 +419,7 @@ async def run_retrieval_compare(
         RetrievalCompareReport
     """
     if strategies is None:
-        strategies = ["vector_only", "hybrid", "query_plan", "hybrid_rerank"]
+        strategies = ["vector_only", "hybrid", "query_plan", "hybrid_rerank", "query_plan_rerank"]
 
     report = RetrievalCompareReport()
     for strat in strategies:

@@ -1,6 +1,34 @@
 """知识工程质量报告、分块预设和金标集加载回归测试。"""
 
 from langchain_core.documents import Document
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_indexing_persists_version_metadata_on_every_chunk(monkeypatch, tmp_path):
+    """质量报告中的文件版本必须随切片写入，供重启后的文档列表读取。"""
+    from app.api import rag
+
+    source = tmp_path / "员工手册.txt"
+    source.write_text("制度正文", encoding="utf-8")
+    chunks = [Document(page_content="制度正文", metadata={"source": str(source), "filename": source.name, "chunk_index": 0})]
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(rag.UniversalDocumentLoader, "load", lambda _path: chunks)
+    monkeypatch.setattr(rag, "split_documents", lambda _documents: chunks)
+    monkeypatch.setattr(rag, "build_index_quality_report", lambda *_args: {"file_sha256": "a" * 64})
+    monkeypatch.setattr(rag, "delete_by_source", lambda _source: 0)
+    monkeypatch.setattr(rag, "add_documents", lambda indexed: captured.setdefault("chunks", indexed) and len(indexed))
+    rag._index_status.clear()
+
+    await rag._index_file(source, source.name, "2025-07-01")
+
+    indexed = captured["chunks"]
+    assert isinstance(indexed, list)
+    assert indexed[0].metadata["file_sha256"] == "a" * 64
+    assert indexed[0].metadata["indexed_at"]
+    assert indexed[0].metadata["document_date"] == "2025-07-01"
+    assert rag._index_status[source.name]["quality"]["indexed_at"]
+    assert rag._index_status[source.name]["quality"]["document_date_source"] == "manual_upload"
 
 
 def test_default_splitter_applies_document_type_preset(monkeypatch):
@@ -80,3 +108,17 @@ def test_load_golden_dataset_validates_jsonl(tmp_path):
 
     assert samples[0]["id"] == "q1"
     assert samples[0]["expected_refusal"] is False
+
+
+def test_pdf_fallback_enriches_page_when_numeric_facts_are_missing(monkeypatch):
+    """MinerU 漏表格数字时，自动模式应保留其文本并补入 PyPDF 回退内容。"""
+    from app.rag.loader import UniversalDocumentLoader
+
+    mineru = [Document(page_content="年假表格标题，连续工作满12个月。", metadata={"page": 2, "parser": "mineru"})]
+    fallback = [Document(page_content="已满1年 5天；已满10年 10天；已满20年 15天。", metadata={"page": 2, "parser": "pypdf"})]
+    monkeypatch.setattr(UniversalDocumentLoader, "_load_pdf_pypdf2", lambda _path: fallback)
+
+    result = UniversalDocumentLoader._enrich_mineru_with_pypdf("policy.pdf", mineru)
+
+    assert "15天" in result[0].page_content
+    assert result[0].metadata["parser"] == "mineru+pypdf_fallback"

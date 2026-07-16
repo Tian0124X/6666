@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useEffect } from "react";
 import { Layout } from "./components/Layout";
+import FeedbackPage from "./pages/FeedbackPage";
 import KnowledgePage from "./pages/KnowledgePage";
 import LoginPage from "./pages/LoginPage";
 import RagPage from "./pages/RagPage";
@@ -20,6 +21,11 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return isLoggedIn ? <>{children}</> : <Navigate to="/login" replace />;
 }
 
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const user = useAuthStore((state) => state.user);
+  return user?.role === "admin" ? <>{children}</> : <Navigate to="/" replace />;
+}
+
 export default function App() {
   const restore = useAuthStore((state) => state.restore);
   useEffect(() => { restore(); }, [restore]);
@@ -28,6 +34,7 @@ export default function App() {
     <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
       <Route index element={<RagPage />} />
       <Route path="knowledge" element={<KnowledgePage />} />
+      <Route path="feedback" element={<AdminRoute><FeedbackPage /></AdminRoute>} />
     </Route>
     <Route path="*" element={<Navigate to="/" replace />} />
   </Routes></BrowserRouter>;

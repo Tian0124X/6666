@@ -71,15 +71,44 @@ class Settings:
     # === RAG 璋冧紭 ===
     RAG_SEARCH_K: int = _int_env("RAG_SEARCH_K", 20)
     RAG_RERANK_TOP_N: int = _int_env("RAG_RERANK_TOP_N", 5)
-    # CPU Cross-Encoder 会造成二十秒级延迟，默认只允许离线评测使用。
+    # Cross-Encoder 默认仅离线评测；线上启用前必须通过金标集与延迟验收。
     RAG_ONLINE_RERANK: bool = os.getenv("RAG_ONLINE_RERANK", "false").lower() == "true"
+    RAG_RERANK_MODEL: str = os.getenv("RAG_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+    RAG_RERANK_DEVICE: str = os.getenv("RAG_RERANK_DEVICE", "")
+    RAG_RERANK_LOCAL_FILES_ONLY: bool = os.getenv("RAG_RERANK_LOCAL_FILES_ONLY", "true").lower() == "true"
+    RAG_RERANK_CANDIDATE_K: int = _int_env("RAG_RERANK_CANDIDATE_K", 20)
+    RAG_RERANK_MIN_CANDIDATES: int = _int_env("RAG_RERANK_MIN_CANDIDATES", 3)
+    RAG_RERANK_BATCH_SIZE: int = _int_env("RAG_RERANK_BATCH_SIZE", 8)
+    RAG_RERANK_TIMEOUT_MS: int = _int_env("RAG_RERANK_TIMEOUT_MS", 1200)
+    RAG_RERANK_MAX_CHARS: int = _int_env("RAG_RERANK_MAX_CHARS", 1200)
+    RAG_RERANK_MAX_QUERY_CHARS: int = _int_env("RAG_RERANK_MAX_QUERY_CHARS", 512)
+    RAG_RERANK_MAX_LENGTH: int = _int_env("RAG_RERANK_MAX_LENGTH", 512)
+    # === RAG 上下文构建 ===
+    RAG_CONTEXT_MAX_TOKENS: int = _int_env("RAG_CONTEXT_MAX_TOKENS", 3000)
+    RAG_CONTEXT_MIN_TOKENS_PER_SOURCE: int = _int_env("RAG_CONTEXT_MIN_TOKENS_PER_SOURCE", 180)
+    RAG_CONTEXT_MAX_TOKENS_PER_SOURCE: int = _int_env("RAG_CONTEXT_MAX_TOKENS_PER_SOURCE", 900)
+    RAG_CONTEXT_DOCUMENT_CAP: int = _int_env("RAG_CONTEXT_DOCUMENT_CAP", 2)
+    RAG_CONTEXT_CHARS_PER_TOKEN: int = _int_env("RAG_CONTEXT_CHARS_PER_TOKEN", 2)
+    # === RAG 可信生成 ===
+    RAG_TRUST_MIN_EVIDENCE_CHARS: int = _int_env("RAG_TRUST_MIN_EVIDENCE_CHARS", 80)
+    RAG_TRUST_MIN_QUERY_TERM_HITS: int = _int_env("RAG_TRUST_MIN_QUERY_TERM_HITS", 1)
+    RAG_TRUST_MIN_CLAIM_CHARS: int = _int_env("RAG_TRUST_MIN_CLAIM_CHARS", 12)
+    RAG_TRUST_REGENERATION_ENABLED: bool = os.getenv("RAG_TRUST_REGENERATION_ENABLED", "true").lower() == "true"
+    # === RAG 过程追踪 ===
+    RAG_TRACE_ENABLED: bool = os.getenv("RAG_TRACE_ENABLED", "true").lower() == "true"
     RAG_EMBEDDING_MODEL: str = os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-m3")
     RAG_EMBEDDING_DIMENSION: int = _int_env("RAG_EMBEDDING_DIMENSION", 1024)
     # === RAG QueryPlan 与受控召回 ===
     RAG_QUERY_PLAN_ENABLED: bool = os.getenv("RAG_QUERY_PLAN_ENABLED", "true").lower() == "true"
     RAG_QUERY_PLAN_VARIANT_LIMIT: int = _int_env("RAG_QUERY_PLAN_VARIANT_LIMIT", 2)
     RAG_QUERY_PLAN_MIN_CANDIDATES: int = _int_env("RAG_QUERY_PLAN_MIN_CANDIDATES", 3)
+    RAG_QUERY_PLAN_MIN_TERM_HITS: int = _int_env("RAG_QUERY_PLAN_MIN_TERM_HITS", 4)
     RAG_QUERY_PLAN_DOCUMENT_CAP: int = _int_env("RAG_QUERY_PLAN_DOCUMENT_CAP", 2)
+    # === RAG 反馈运营 ===
+    RAG_FEEDBACK_SLA_HOURS: int = _int_env("RAG_FEEDBACK_SLA_HOURS", 72)
+    # 当前答案金标 P95 为 2810.7ms，默认以 3000ms 作为运行态总耗时预警线。
+    RAG_TOTAL_LATENCY_ALERT_P95_MS: int = _int_env("RAG_TOTAL_LATENCY_ALERT_P95_MS", 3000)
+    RAG_LATENCY_ALERT_MIN_SAMPLES: int = _int_env("RAG_LATENCY_ALERT_MIN_SAMPLES", 20)
     # === RAG 记忆边界 ===
     RAG_MEMORY_RECENT_TURNS: int = _int_env("RAG_MEMORY_RECENT_TURNS", 6)
     RAG_MEMORY_SUMMARY_TRIGGER_TURNS: int = _int_env("RAG_MEMORY_SUMMARY_TRIGGER_TURNS", 8)

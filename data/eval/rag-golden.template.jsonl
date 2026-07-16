@@ -1,3 +1,3 @@
-{"id":"policy-annual-leave","question":"员工累计工作满十年后有几天年休假？","relevant_docs":["员工手册.pdf"],"relevance_grades":{"员工手册.pdf":3},"category":"制度问答","expected_refusal":false}
-{"id":"table-expense-limit","question":"一线城市出差住宿费上限是多少？","relevant_docs":["差旅管理制度.pdf"],"relevance_grades":{"差旅管理制度.pdf":3},"category":"表格与数值","expected_refusal":false}
-{"id":"unsupported-question","question":"公司明年的海外营收目标是多少？","relevant_docs":[],"relevance_grades":{},"category":"应拒答","expected_refusal":true}
+{"id":"policy-annual-leave","question":"员工累计工作满十年后有几天年休假？","relevant_docs":["员工手册.pdf"],"relevance_grades":{"员工手册.pdf":3},"category":"制度问答","expected_refusal":false,"expected_answer_terms":["10天"],"expected_citation_documents":["员工手册.pdf"]}
+{"id":"table-expense-limit","question":"一线城市出差住宿费上限是多少？","relevant_docs":["差旅管理制度.pdf"],"relevance_grades":{"差旅管理制度.pdf":3},"category":"表格与数值","expected_refusal":false,"expected_answer_terms":["500元"],"expected_citation_documents":["差旅管理制度.pdf"]}
+{"id":"unsupported-question","question":"公司明年的海外营收目标是多少？","relevant_docs":[],"relevance_grades":{},"category":"应拒答","expected_refusal":true,"expected_answer_terms":[],"expected_citation_documents":[]}

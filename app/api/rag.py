@@ -7,10 +7,12 @@ import json
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import date, datetime, timezone
 from pathlib import Path
+from threading import Lock
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -21,7 +23,7 @@ from app.rag.quality import build_index_quality_report
 from app.rag.retriever import rag_qa, rag_qa_stream
 from app.memory.profile import user_preference_memory
 from app.memory.session import session_memory
-from app.api.auth import get_current_user, require_user
+from app.api.auth import get_current_user, require_role, require_user
 from app.models.user import UserInfo
 from app.rag.splitter import split_documents
 from app.rag.store import (
@@ -37,7 +39,10 @@ from app.rag.store import (
 router = APIRouter(tags=["知识库 RAG"])
 DOCUMENTS_DIR = Path("data/documents").resolve()
 FEEDBACK_FILE = Path("data/rag-feedback.jsonl")
+FEEDBACK_QUEUE_FILE = Path("data/rag-feedback-queue.jsonl")
+FEEDBACK_ACTION_FILE = Path("data/rag-feedback-actions.jsonl")
 _index_status: dict[str, dict] = {}
+_feedback_lock = Lock()
 
 
 class RagTurn(BaseModel):
@@ -63,8 +68,28 @@ class RagFeedbackRequest(BaseModel):
     answer: str = Field(min_length=1, max_length=12000)
     verdict: str = Field(pattern="^(useful|not_useful|wrong_source)$")
     citation_id: str | None = Field(default=None, max_length=20)
+    trace_id: str | None = Field(default=None, max_length=64)
+    category: str | None = Field(
+        default=None,
+        pattern="^(knowledge_gap|recall_or_ranking|answer_quality|citation_error)$",
+    )
     note: str = Field(default="", max_length=1000)
     sources: list[dict] = Field(default_factory=list, max_length=8)
+
+
+class RagFeedbackResolutionRequest(BaseModel):
+    """管理员对待处理反馈做出的人工结论。"""
+
+    outcome: str = Field(
+        pattern="^(golden_dataset|knowledge_engineering|retrieval_tuning|dismissed)$",
+    )
+    note: str = Field(default="", max_length=1000)
+
+
+class RagFeedbackAssignmentRequest(BaseModel):
+    """管理员为待处理反馈指定负责人。"""
+
+    owner: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.@-]+$")
 
 
 class UserPreferenceRequest(BaseModel):
@@ -78,7 +103,91 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-async def _index_file(path: Path, filename: str) -> None:
+def _append_jsonl(path: Path, record: dict) -> None:
+    """以进程内互斥方式追加审计记录，避免并发请求交叉写入。"""
+    with _feedback_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as output:
+            output.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    """容忍单条损坏记录，保证历史反馈不会阻塞队列处理。"""
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    with _feedback_lock:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+    return records
+
+
+def _feedback_queue_records() -> list[dict]:
+    """将待办与人工结论合并为最新视图，底层文件保持只追加。"""
+    records = {str(item.get("id")): dict(item) for item in _read_jsonl(FEEDBACK_QUEUE_FILE) if item.get("id")}
+    for action in _read_jsonl(FEEDBACK_ACTION_FILE):
+        feedback_id = str(action.get("feedback_id", ""))
+        if feedback_id not in records:
+            continue
+        if action.get("action") == "assignment":
+            records[feedback_id]["assignment"] = {
+                "owner": action.get("owner"),
+                "assigned_at": action.get("assigned_at"),
+                "assigned_by": action.get("assigned_by"),
+            }
+        else:
+            records[feedback_id].update({
+                "status": "resolved",
+                "resolution": {
+                    "outcome": action.get("outcome"),
+                    "note": action.get("note", ""),
+                    "resolved_at": action.get("resolved_at"),
+                    "resolved_by": action.get("resolved_by"),
+                },
+            })
+    return sorted(records.values(), key=lambda item: str(item.get("created_at", "")), reverse=True)
+
+
+def _feedback_queue_summary(records: list[dict]) -> dict:
+    """汇总反馈待办的数量、归因与最久等待时长，供运营页面观察 SLA。"""
+    pending = [item for item in records if item.get("status") == "pending"]
+    category_counts = Counter(
+        str(item.get("category") or "unclassified") for item in pending
+    )
+    ages: list[float] = []
+    overdue_total = 0
+    unassigned_total = 0
+    now = datetime.now(timezone.utc)
+    for item in pending:
+        try:
+            created_at = datetime.fromisoformat(str(item.get("created_at")))
+        except (TypeError, ValueError):
+            continue
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        age_hours = max(0.0, (now - created_at).total_seconds() / 3600)
+        ages.append(age_hours)
+        if age_hours >= max(1, settings.RAG_FEEDBACK_SLA_HOURS):
+            overdue_total += 1
+        if not (item.get("assignment") or {}).get("owner"):
+            unassigned_total += 1
+    return {
+        "pending_total": len(pending),
+        "resolved_total": sum(1 for item in records if item.get("status") == "resolved"),
+        "pending_by_category": dict(sorted(category_counts.items())),
+        "oldest_pending_age_hours": round(max(ages), 1) if ages else None,
+        "sla_hours": max(1, settings.RAG_FEEDBACK_SLA_HOURS),
+        "overdue_total": overdue_total,
+        "unassigned_total": unassigned_total,
+    }
+
+
+async def _index_file(path: Path, filename: str, document_date: str | None = None) -> None:
     """后台完成解析、分块和索引，上传接口不等待模型计算。"""
     _index_status[filename] = {"status": "indexing", "stage": "正在解析文档", "chunks": 0, "error": ""}
     try:
@@ -88,6 +197,16 @@ async def _index_file(path: Path, filename: str) -> None:
         if not chunks:
             raise ValueError("文档未解析出可索引内容")
         quality = await asyncio.to_thread(build_index_quality_report, path, documents, chunks)
+        indexed_at = datetime.now(timezone.utc).isoformat()
+        for chunk in chunks:
+            chunk.metadata["file_sha256"] = quality["file_sha256"]
+            chunk.metadata["indexed_at"] = indexed_at
+            if document_date:
+                chunk.metadata["document_date"] = document_date
+        quality["indexed_at"] = indexed_at
+        if document_date:
+            quality["document_date"] = document_date
+            quality["document_date_source"] = "manual_upload"
         _index_status[filename].update({"stage": "正在写入知识库", "chunks": len(chunks)})
         replaced_chunks = await asyncio.to_thread(delete_by_source, str(path))
         count = await asyncio.to_thread(add_documents, chunks)
@@ -247,7 +366,10 @@ async def get_memory_summary(
 
 
 @router.post("/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(
+    file: UploadFile = File(...),
+    document_date: str | None = Form(default=None),
+):
     """保存原文件并异步建立可追溯索引。"""
     if not file.filename:
         raise HTTPException(status_code=400, detail="文件名不能为空")
@@ -256,6 +378,12 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="文件名不合法")
     if Path(filename).suffix.lower() not in {".pdf", ".docx", ".xlsx", ".xls", ".txt", ".csv"}:
         raise HTTPException(status_code=400, detail="暂不支持该文件类型")
+    normalized_document_date = None
+    if document_date and document_date.strip():
+        try:
+            normalized_document_date = date.fromisoformat(document_date.strip()).isoformat()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="文档日期必须为 YYYY-MM-DD") from exc
     content = await file.read()
     if len(content) > 50 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="文件不能超过 50MB")
@@ -264,15 +392,21 @@ async def upload_document(file: UploadFile = File(...)):
     with target.open("wb") as output:
         output.write(content)
     _index_status[filename] = {"status": "pending", "stage": "文件已上传，等待索引", "chunks": 0, "error": ""}
-    asyncio.create_task(_index_file(target, filename))
-    return {"status": "accepted", "filename": filename, "chunks": 0, "stage": "文件已上传，正在建立索引"}
+    asyncio.create_task(_index_file(target, filename, normalized_document_date))
+    return {
+        "status": "accepted", "filename": filename, "chunks": 0,
+        "stage": "文件已上传，正在建立索引", "document_date": normalized_document_date,
+    }
 
 
 @router.get("/documents")
 async def list_documents():
     """返回已索引文档及上传后的索引状态。"""
     indexed = {item["filename"]: item for item in get_document_summaries()}
-    files = {item.name: item for item in DOCUMENTS_DIR.glob("*") if item.is_file()} if DOCUMENTS_DIR.exists() else {}
+    files = {
+        item.name: item for item in DOCUMENTS_DIR.glob("*")
+        if item.is_file() and item.name != ".gitkeep"
+    } if DOCUMENTS_DIR.exists() else {}
     names = sorted(set(indexed) | set(files))
     documents = []
     for filename in names:
@@ -289,6 +423,13 @@ async def list_documents():
             "completed_at": task.get("completed_at"),
             "size": files[filename].stat().st_size if filename in files else None,
         }
+        if summary.get("file_sha256") or summary.get("indexed_at"):
+            item["version"] = {
+                "file_sha256": summary.get("file_sha256"),
+                "indexed_at": summary.get("indexed_at"),
+            }
+        if summary.get("document_date"):
+            item["document_date"] = summary["document_date"]
         if task.get("quality"):
             item["quality"] = task["quality"]
         documents.append(item)
@@ -346,25 +487,120 @@ async def download_document(document_id: str):
 async def diagnostics():
     """展示单一 RAG 链路的运行状态，避免隐藏慢路径。"""
     from app.config import settings
+    from app.rag.reranker import reranker_status
+    from app.rag.trace import get_recent_trace_latency_summary
+    recent_latency = get_recent_trace_latency_summary()
+    trace_samples = int(recent_latency.get("trace_samples", 0) or 0)
+    total_p95 = (recent_latency.get("total") or {}).get("p95_ms")
+    minimum_samples = max(1, settings.RAG_LATENCY_ALERT_MIN_SAMPLES)
+    threshold_ms = max(1, settings.RAG_TOTAL_LATENCY_ALERT_P95_MS)
+    if trace_samples < minimum_samples:
+        latency_alert_status = "insufficient_samples"
+    elif isinstance(total_p95, (int, float)) and total_p95 > threshold_ms:
+        latency_alert_status = "alert"
+    else:
+        latency_alert_status = "normal"
     return {
         "backend": "pgvector",
         "document_count": get_document_count(),
         "indexed_documents": get_unique_sources(),
         "embedding_model": settings.RAG_EMBEDDING_MODEL,
         "online_rerank": settings.RAG_ONLINE_RERANK,
+        "reranker": reranker_status(),
         "latency_target": {"retrieval_p95_ms": 1000, "first_token_p95_ms": 2000},
+        "latency_alert": {
+            "status": latency_alert_status,
+            "minimum_samples": minimum_samples,
+            "threshold_p95_ms": threshold_ms,
+            "current_p95_ms": total_p95,
+        },
+        "recent_latency": recent_latency,
     }
 
 
 @router.post("/feedback")
 async def submit_feedback(feedback: RagFeedbackRequest):
-    """将反馈以 JSONL 形式追加保存，供离线评测回放。"""
+    """保存反馈，并将负反馈自动写入待人工处理队列。"""
+    if feedback.category:
+        category = feedback.category
+    elif feedback.verdict == "wrong_source":
+        category = "citation_error"
+    elif feedback.verdict == "not_useful" and not feedback.sources:
+        category = "knowledge_gap"
+    else:
+        category = "answer_quality" if feedback.verdict == "not_useful" else None
     record = {
         "id": str(uuid.uuid4()),
         "created_at": datetime.now(timezone.utc).isoformat(),
         **feedback.model_dump(),
+        "category": category,
+        "status": "pending" if feedback.verdict != "useful" else "accepted",
     }
-    FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with FEEDBACK_FILE.open("a", encoding="utf-8") as output:
-        output.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return {"status": "ok", "feedback_id": record["id"]}
+    _append_jsonl(FEEDBACK_FILE, record)
+    if record["status"] == "pending":
+        _append_jsonl(FEEDBACK_QUEUE_FILE, record)
+    return {"status": "ok", "feedback_id": record["id"], "queue_status": record["status"]}
+
+
+@router.get("/feedback/queue")
+async def list_feedback_queue(
+    status: str = Query(default="pending", pattern="^(pending|resolved)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+    user: UserInfo = Depends(require_role("admin")),
+):
+    """管理员查看待处理或已结案的反馈，不向普通用户暴露运营数据。"""
+    all_records = _feedback_queue_records()
+    records = [item for item in all_records if item.get("status") == status]
+    return {
+        "items": records[:limit],
+        "total": len(records),
+        "summary": _feedback_queue_summary(all_records),
+    }
+
+
+@router.post("/feedback/{feedback_id}/resolve")
+async def resolve_feedback(
+    feedback_id: str,
+    resolution: RagFeedbackResolutionRequest,
+    user: UserInfo = Depends(require_role("admin")),
+):
+    """管理员人工结案；只记录后续动作，不自动写入金标或知识库。"""
+    pending = next((item for item in _feedback_queue_records() if item.get("id") == feedback_id), None)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="反馈待办不存在")
+    if pending.get("status") != "pending":
+        raise HTTPException(status_code=409, detail="反馈待办已结案")
+    action = {
+        "id": str(uuid.uuid4()),
+        "action": "resolution",
+        "feedback_id": feedback_id,
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+        "resolved_by": user.username,
+        **resolution.model_dump(),
+    }
+    _append_jsonl(FEEDBACK_ACTION_FILE, action)
+    return {"status": "resolved", "feedback_id": feedback_id, "outcome": resolution.outcome}
+
+
+@router.patch("/feedback/{feedback_id}/assignment")
+async def assign_feedback(
+    feedback_id: str,
+    assignment: RagFeedbackAssignmentRequest,
+    user: UserInfo = Depends(require_role("admin")),
+):
+    """管理员分派负责人；只追加审计动作且不会改变反馈内容。"""
+    pending = next((item for item in _feedback_queue_records() if item.get("id") == feedback_id), None)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="反馈待办不存在")
+    if pending.get("status") != "pending":
+        raise HTTPException(status_code=409, detail="已结案反馈无需分派")
+    action = {
+        "id": str(uuid.uuid4()),
+        "action": "assignment",
+        "feedback_id": feedback_id,
+        "owner": assignment.owner,
+        "assigned_at": datetime.now(timezone.utc).isoformat(),
+        "assigned_by": user.username,
+    }
+    _append_jsonl(FEEDBACK_ACTION_FILE, action)
+    return {"status": "assigned", "feedback_id": feedback_id, "owner": assignment.owner}

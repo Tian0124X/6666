@@ -57,3 +57,41 @@ def test_documents_list_keeps_uploaded_file_visible_while_indexing(monkeypatch, 
         "status": "indexing", "stage": "正在写入知识库", "error": "",
         "completed_at": None, "size": 3,
     }]
+
+
+def test_documents_list_hides_repository_placeholder(monkeypatch, tmp_path):
+    """知识库目录的占位文件不能被误显示成待索引文档。"""
+    from app.api import rag
+    from main import app
+
+    (tmp_path / ".gitkeep").write_text("", encoding="utf-8")
+    monkeypatch.setattr(rag, "DOCUMENTS_DIR", tmp_path)
+    monkeypatch.setattr(rag, "_index_status", {})
+    monkeypatch.setattr(rag, "get_document_summaries", lambda: [])
+    monkeypatch.setattr(rag, "get_document_count", lambda: 0)
+
+    response = TestClient(app).get("/api/rag/documents")
+
+    assert response.status_code == 200
+    assert response.json()["documents"] == []
+
+
+def test_documents_list_exposes_persisted_manual_document_date(monkeypatch, tmp_path):
+    """日期必须来自已持久化的切片元数据，而不是文件系统时间。"""
+    from app.api import rag
+    from main import app
+
+    (tmp_path / "员工手册.pdf").write_bytes(b"pdf")
+    monkeypatch.setattr(rag, "DOCUMENTS_DIR", tmp_path)
+    monkeypatch.setattr(rag, "_index_status", {})
+    monkeypatch.setattr(rag, "get_document_summaries", lambda: [{
+        "filename": "员工手册.pdf", "document_id": "doc-1", "chunks": 2,
+        "file_sha256": "a" * 64, "indexed_at": "2026-07-16T00:00:00+00:00",
+        "document_date": "2025-07-01",
+    }])
+    monkeypatch.setattr(rag, "get_document_count", lambda: 2)
+
+    response = TestClient(app).get("/api/rag/documents")
+
+    assert response.status_code == 200
+    assert response.json()["documents"][0]["document_date"] == "2025-07-01"

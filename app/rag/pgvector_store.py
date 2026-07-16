@@ -122,6 +122,11 @@ class PGVectorStore:
                    ON vector_documents (((metadata ->> 'page')::integer))
                    WHERE (metadata ->> 'page') ~ '^[0-9]+$'"""
             )
+            cur.execute(
+                """CREATE INDEX IF NOT EXISTS idx_vector_documents_document_date
+                   ON vector_documents ((metadata ->> 'document_date'))
+                   WHERE (metadata ->> 'document_date') ~ '^\\d{4}-\\d{2}-\\d{2}$'"""
+            )
             try:
                 cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
                 cur.execute(
@@ -227,6 +232,12 @@ class PGVectorStore:
         return list(dict.fromkeys(terms))[:6]
 
     @staticmethod
+    def _identifier_terms(query: str) -> list[str]:
+        """提取 SP0001 一类精确业务标识符，用于优先定位结构化行。"""
+        terms = re.findall(r"\b[A-Za-z]{1,12}[-_]?\d{2,}\b", query.upper())
+        return list(dict.fromkeys(terms))[:3]
+
+    @staticmethod
     def _build_filter_clause(filters: dict[str, Any] | None) -> tuple[str, list[Any]]:
         """构建固定字段的参数化过滤 SQL，禁止将用户输入拼入语句。"""
         filters = filters or {}
@@ -264,6 +275,14 @@ class PGVectorStore:
         if file_types:
             clauses.append("metadata ->> 'file_type' = ANY(%s)")
             params.append(file_types)
+        document_date_start = filters.get("document_date_start")
+        if isinstance(document_date_start, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", document_date_start):
+            clauses.append("metadata ->> 'document_date' >= %s")
+            params.append(document_date_start)
+        document_date_end = filters.get("document_date_end")
+        if isinstance(document_date_end, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", document_date_end):
+            clauses.append("metadata ->> 'document_date' <= %s")
+            params.append(document_date_end)
         return (" AND ".join(clauses) if clauses else "TRUE"), params
 
     def search(
@@ -301,6 +320,19 @@ class PGVectorStore:
                 keyword_rows = cur.fetchall()
             else:
                 keyword_rows = []
+            identifier_terms = self._identifier_terms(query)
+            if identifier_terms:
+                identifier_patterns = [f"%{term}%" for term in identifier_terms]
+                cur.execute(
+                    """SELECT id::text, content, metadata, source, filename, 1.0 AS raw_score
+                       FROM vector_documents WHERE content ILIKE ANY(%s) AND """ + filter_clause + """
+                       ORDER BY chunk_index ASC
+                       LIMIT %s""",
+                    [identifier_patterns, *filter_params, fetch_k],
+                )
+                identifier_rows = cur.fetchall()
+            else:
+                identifier_rows = []
         finally:
             cur.close()
 
@@ -316,7 +348,15 @@ class PGVectorStore:
         fused = reciprocal_rank_fusion(
             [to_candidate(row) for row in vector_rows],
             [to_candidate(row) for row in keyword_rows],
-        )[:k]
+        )
+        # 精确标识符的命中行优先于语义近似块，防止表格中相邻商品抢占答案上下文。
+        exact_candidates = [to_candidate(row) for row in identifier_rows]
+        exact_ids = {candidate["chunk_id"] for candidate in exact_candidates}
+        fused = [
+            {**candidate, "score": 1.0 - position * 0.0001}
+            for position, candidate in enumerate(exact_candidates)
+        ] + [candidate for candidate in fused if candidate["chunk_id"] not in exact_ids]
+        fused = fused[:k]
         docs = []
         for candidate in fused:
             metadata = dict(candidate["metadata"])
@@ -402,7 +442,10 @@ class PGVectorStore:
         cur = self.conn.cursor()
         try:
             cur.execute(
-                """SELECT source, filename, COUNT(*)
+                """SELECT source, filename, COUNT(*),
+                          MIN(metadata ->> 'file_sha256') AS file_sha256,
+                          MAX(metadata ->> 'indexed_at') AS indexed_at,
+                          MIN(metadata ->> 'document_date') AS document_date
                    FROM vector_documents
                    GROUP BY source, filename
                    ORDER BY filename"""
@@ -413,8 +456,11 @@ class PGVectorStore:
                     "filename": filename,
                     "chunks": int(chunks),
                     "document_id": self._document_id(source, filename),
+                    "file_sha256": file_sha256,
+                    "indexed_at": indexed_at,
+                    "document_date": document_date,
                 }
-                for source, filename, chunks in cur.fetchall()
+                for source, filename, chunks, file_sha256, indexed_at, document_date in cur.fetchall()
             ]
         finally:
             cur.close()

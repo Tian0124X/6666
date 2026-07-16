@@ -6,7 +6,9 @@ import asyncio
 import json
 import re
 import time
+from calendar import monthrange
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -21,6 +23,12 @@ _PAGE_PATTERN = re.compile(r"第?\s*(\d+)\s*(?:页\s*(?:到|至|[-~])\s*第?\s*(
 _SINGLE_PAGE_PATTERN = re.compile(r"第\s*(\d+)\s*页")
 _SHEET_PATTERN = re.compile(r"(?:sheet|工作表)\s*(?:为|是|[:：])?\s*[\"“”']?([\w\-\u4e00-\u9fff]+)", re.IGNORECASE)
 _FILE_TYPE_PATTERN = re.compile(r"(?<![\w.])(pdf|docx|xlsx|xls|txt|csv)(?:\s*(?:文件|文档|格式))?", re.IGNORECASE)
+_EXACT_IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z]{1,12}[-_]?\d{2,}\b")
+_DATE_TOKEN_PATTERN = re.compile(
+    r"(?<!\d)(?P<year>(?:19|20)\d{2})(?:\s*年\s*(?P<cn_month>0?[1-9]|1[0-2])\s*月(?:\s*(?P<cn_day>0?[1-9]|[12]\d|3[01])\s*日?)?|[-/.](?P<num_month>0?[1-9]|1[0-2])(?:[-/.](?P<num_day>0?[1-9]|[12]\d|3[01]))?)(?!\d)"
+)
+_YEAR_PATTERN = re.compile(r"(?<!\d)((?:19|20)\d{2})\s*年(?!\s*\d)")
+_DATE_RANGE_CONNECTOR_PATTERN = re.compile(r"\s*(?:到|至|[-~—–])\s*$")
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,8 @@ class QueryFilters:
     page_end: int | None = None
     sheet: str | None = None
     file_types: tuple[str, ...] = ()
+    document_date_start: str | None = None
+    document_date_end: str | None = None
 
     def to_store_filters(self) -> dict[str, Any]:
         """转换为存储层参数，空条件不会参与 SQL 拼接。"""
@@ -45,6 +55,10 @@ class QueryFilters:
             result["sheet"] = self.sheet
         if self.file_types:
             result["file_types"] = list(self.file_types)
+        if self.document_date_start:
+            result["document_date_start"] = self.document_date_start
+        if self.document_date_end:
+            result["document_date_end"] = self.document_date_end
         return result
 
     def to_trace(self) -> dict[str, Any]:
@@ -63,6 +77,7 @@ class QueryPlan:
     source: str = "rules"
     fallback_reason: str | None = None
     planning_ms: float = 0.0
+    trace_id: str = ""
 
     @property
     def queries(self) -> list[str]:
@@ -91,8 +106,49 @@ def is_follow_up(question: str) -> bool:
     return len(normalized) <= 36 and any(marker in normalized for marker in FOLLOW_UP_MARKERS)
 
 
+def _date_token_range(match: re.Match[str]) -> tuple[str, str] | None:
+    """将年月日或年月解析为可比较的 ISO 日期区间。"""
+    year = int(match.group("year"))
+    month = int(match.group("cn_month") or match.group("num_month"))
+    day_text = match.group("cn_day") or match.group("num_day")
+    try:
+        if day_text:
+            exact = date(year, month, int(day_text)).isoformat()
+            return exact, exact
+        return date(year, month, 1).isoformat(), date(year, month, monthrange(year, month)[1]).isoformat()
+    except ValueError:
+        return None
+
+
+def _extract_document_date_range(question: str) -> tuple[str | None, str | None]:
+    """只解析用户明确给出的日期，不从文件名、文件时间或模型结果推断。"""
+    tokens = [
+        (match.start(), match.end(), value)
+        for match in _DATE_TOKEN_PATTERN.finditer(question)
+        if (value := _date_token_range(match)) is not None
+    ]
+    if len(tokens) >= 2:
+        _, first_end, first_range = tokens[0]
+        second_start, _, second_range = tokens[1]
+        if _DATE_RANGE_CONNECTOR_PATTERN.fullmatch(question[first_end:second_start]):
+            return first_range[0], second_range[1]
+    if tokens:
+        return tokens[0][2]
+
+    year_match = _YEAR_PATTERN.search(question)
+    if not year_match:
+        return None, None
+    year = int(year_match.group(1))
+    suffix = question[year_match.end():year_match.end() + 4]
+    if re.match(r"\s*(?:之后|以后|起|以来)", suffix):
+        return date(year, 1, 1).isoformat(), None
+    if re.match(r"\s*(?:之前|以前|截止|截至)", suffix):
+        return None, date(year, 12, 31).isoformat()
+    return date(year, 1, 1).isoformat(), date(year, 12, 31).isoformat()
+
+
 def extract_explicit_filters(question: str) -> QueryFilters:
-    """解析文件、页码和 Sheet 等明确条件；不从模型输出中补造条件。"""
+    """解析文件、页码、Sheet 和日期等明确条件；不从模型输出中补造条件。"""
     # 中文方括号可能是文件名的一部分，只移除作为引用符号的书名号。
     filenames = tuple(dict.fromkeys(match.group(1).strip("《》") for match in _FILENAME_PATTERN.finditer(question)))
     range_match = _PAGE_PATTERN.search(question)
@@ -107,13 +163,21 @@ def extract_explicit_filters(question: str) -> QueryFilters:
             page_start = page_end = int(single_page.group(1))
     sheet_match = _SHEET_PATTERN.search(question)
     file_types = tuple(dict.fromkeys(match.group(1).lower() for match in _FILE_TYPE_PATTERN.finditer(question)))
+    document_date_start, document_date_end = _extract_document_date_range(question)
     return QueryFilters(
         filenames=filenames,
         page_start=page_start,
         page_end=page_end,
         sheet=sheet_match.group(1) if sheet_match else None,
         file_types=file_types,
+        document_date_start=document_date_start,
+        document_date_end=document_date_end,
     )
+
+
+def extract_exact_identifiers(question: str) -> tuple[str, ...]:
+    """提取不可被 Query 改写改变的业务主键、订单号等精确标识符。"""
+    return tuple(dict.fromkeys(match.upper() for match in _EXACT_IDENTIFIER_PATTERN.findall(question)))
 
 
 def build_rule_plan(question: str) -> QueryPlan:
@@ -121,8 +185,22 @@ def build_rule_plan(question: str) -> QueryPlan:
     return QueryPlan(
         original_query=question,
         canonical_query=question,
+        variants=_build_rule_variants(question),
         filters=extract_explicit_filters(question),
     )
+
+
+def _build_rule_variants(question: str) -> list[str]:
+    """只对高价值领域同义表达生成确定性变体，不调用模型也不改动显式条件。"""
+    variants: list[str] = []
+    normalized = question.replace(" ", "")
+    if "年假" in normalized and "年休假" not in normalized:
+        variants.append(question.replace("年假", "年休假"))
+    if "新员工" in normalized and "累计工龄" in normalized:
+        variants.append("新入职员工累计工龄佐证材料提交期限")
+    if "同一部门" in normalized and "休假" in normalized and ("上限" in normalized or "比例" in normalized):
+        variants.append("同一部门同时间段休假人数不得超过部门在岗人数")
+    return variants[:max(0, settings.RAG_QUERY_PLAN_VARIANT_LIMIT)]
 
 
 async def build_llm_plan(question: str, history: list[dict] | None, base_plan: QueryPlan) -> QueryPlan:
@@ -141,7 +219,7 @@ async def build_llm_plan(question: str, history: list[dict] | None, base_plan: Q
     prompt = ChatPromptTemplate.from_template(
         """将问题转换为独立、适合知识库检索的表述，并给出最多两条同义检索变体。
 只能输出 JSON 对象：{{\"canonical_query\": \"...\", \"variants\": [\"...\"]}}。
-不要添加文件、页码、时间或 Sheet 条件；无法判断时 canonical_query 必须保留原问题且 variants 为空。
+不要添加文件、页码、时间或 Sheet 条件；不得删除、替换或编造问题中的业务标识符（如 SP0001）；无法判断时 canonical_query 必须保留原问题且 variants 为空。
 
 对话历史：
 {history}
@@ -164,6 +242,13 @@ async def build_llm_plan(question: str, history: list[dict] | None, base_plan: Q
             item.strip() for item in variants
             if isinstance(item, str) and item.strip() and len(item.strip()) <= 400
         ][:max(0, settings.RAG_QUERY_PLAN_VARIANT_LIMIT)]
+        required_identifiers = extract_exact_identifiers(question)
+        candidate_queries = [canonical.strip(), *clean_variants]
+        if required_identifiers and any(
+            any(identifier not in candidate.upper() for identifier in required_identifiers)
+            for candidate in candidate_queries
+        ):
+            raise ValueError("模型改写丢失业务标识符")
         return QueryPlan(
             original_query=question,
             canonical_query=canonical.strip()[:400],

@@ -2,6 +2,7 @@
 
 import os
 import logging
+import re
 from pathlib import Path
 from typing import List
 from langchain_core.documents import Document
@@ -77,6 +78,8 @@ class UniversalDocumentLoader:
                     logger.error(
                         f"MinerU 解析无输出 (forced engine=mineru): {file_path}"
                     )
+            elif pdf_engine == "auto":
+                docs = UniversalDocumentLoader._enrich_mineru_with_pypdf(file_path, docs)
             return docs
         else:
             return UniversalDocumentLoader._load_pdf_pypdf2(file_path)
@@ -113,6 +116,36 @@ class UniversalDocumentLoader:
             f"(总 {sum(len(d.page_content) for d in docs)} 字符)"
         )
         return docs
+
+    @staticmethod
+    def _enrich_mineru_with_pypdf(file_path: str, mineru_docs: List[Document]) -> List[Document]:
+        """仅在 PyPDF 明确提取到更多数值事实时补全文本，防止表格行静默丢失。"""
+        fallback_docs = UniversalDocumentLoader._load_pdf_pypdf2(file_path)
+        fallback_by_page = {item.metadata.get("page"): item for item in fallback_docs}
+        enriched: list[Document] = []
+        for document in mineru_docs:
+            fallback = fallback_by_page.get(document.metadata.get("page"))
+            if not fallback:
+                enriched.append(document)
+                continue
+            mineru_numbers = set(re.findall(r"\d+(?:\.\d+)?", document.page_content))
+            fallback_numbers = set(re.findall(r"\d+(?:\.\d+)?", fallback.page_content))
+            missing_numbers = fallback_numbers - mineru_numbers
+            mineru_table_rows = set(re.findall(r"已满\s*\d+\s*年(?:\s*不满\s*\d+\s*年)?", document.page_content))
+            fallback_table_rows = set(re.findall(r"已满\s*\d+\s*年(?:\s*不满\s*\d+\s*年)?", fallback.page_content))
+            missing_table_rows = fallback_table_rows - mineru_table_rows
+            if len(missing_numbers) < 3 and len(missing_table_rows) < 2:
+                enriched.append(document)
+                continue
+            metadata = dict(document.metadata)
+            metadata["parser"] = f"{metadata.get('parser', 'mineru')}+pypdf_fallback"
+            metadata["fallback_numeric_facts"] = len(missing_numbers)
+            metadata["fallback_table_rows"] = len(missing_table_rows)
+            enriched.append(Document(
+                page_content=document.page_content.rstrip() + "\n\n[PyPDF 表格文本回退]\n" + fallback.page_content,
+                metadata=metadata,
+            ))
+        return enriched
 
     @staticmethod
     def _load_pdf_pypdf2(file_path: str) -> List[Document]:

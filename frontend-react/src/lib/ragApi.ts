@@ -35,6 +35,39 @@ export interface Evidence {
   nearby: { chunk_id: string; content: string; page?: number | null; chunk_index?: number | null }[];
 }
 
+export type FeedbackQueueStatus = "pending" | "resolved";
+export type FeedbackOutcome = "golden_dataset" | "knowledge_engineering" | "retrieval_tuning" | "dismissed";
+
+export interface FeedbackQueueItem {
+  id: string;
+  created_at: string;
+  question: string;
+  answer: string;
+  verdict: "useful" | "not_useful" | "wrong_source";
+  category?: string | null;
+  note?: string;
+  trace_id?: string | null;
+  sources?: { filename?: string; page?: number | null; citation_id?: string }[];
+  status: FeedbackQueueStatus;
+  resolution?: {
+    outcome: FeedbackOutcome;
+    note: string;
+    resolved_at: string;
+    resolved_by: string;
+  };
+  assignment?: { owner: string; assigned_at: string; assigned_by: string };
+}
+
+export interface FeedbackQueueSummary {
+  pending_total: number;
+  resolved_total: number;
+  pending_by_category: Record<string, number>;
+  oldest_pending_age_hours: number | null;
+  sla_hours: number;
+  overdue_total: number;
+  unassigned_total: number;
+}
+
 export function streamRagAnswer(
   body: { question: string; session_id: string; history: { role: "user" | "assistant"; content: string }[] },
   onEvent: (event: RagEvent) => void,
@@ -91,4 +124,30 @@ export async function submitRagFeedback(payload: {
     body: JSON.stringify(payload),
   });
   if (!response.ok) throw new Error("反馈提交失败");
+}
+
+export async function getFeedbackQueue(status: FeedbackQueueStatus): Promise<{ items: FeedbackQueueItem[]; total: number; summary: FeedbackQueueSummary }> {
+  const response = await fetch(`${RAG_BASE}/feedback/queue?status=${status}`, { headers: authHeader() });
+  if (!response.ok) throw new Error(response.status === 403 ? "仅管理员可查看反馈队列" : "反馈队列读取失败");
+  return response.json();
+}
+
+export async function resolveFeedback(
+  feedbackId: string, outcome: FeedbackOutcome, note: string,
+): Promise<void> {
+  const response = await fetch(`${RAG_BASE}/feedback/${encodeURIComponent(feedbackId)}/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeader() },
+    body: JSON.stringify({ outcome, note }),
+  });
+  if (!response.ok) throw new Error("反馈结案失败，请刷新后重试");
+}
+
+export async function assignFeedback(feedbackId: string, owner: string): Promise<void> {
+  const response = await fetch(`${RAG_BASE}/feedback/${encodeURIComponent(feedbackId)}/assignment`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeader() },
+    body: JSON.stringify({ owner }),
+  });
+  if (!response.ok) throw new Error("反馈分派失败");
 }
